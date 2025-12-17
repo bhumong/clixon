@@ -247,7 +247,8 @@ identityref_add_ns(cxobj *x,
     char      *ns = NULL;
 
     if ((y = xml_spec(x)) != NULL &&
-        yang_keyword_get(y) == Y_LEAF){
+        (yang_keyword_get(y) == Y_LEAF ||
+         yang_keyword_get(y) == Y_LEAF_LIST)){
         if (yang_type_get(y, &origtype, &yrestype, NULL, NULL, NULL, NULL, NULL) < 0)
             goto done;
         restype = yrestype?yang_argument_get(yrestype):NULL;
