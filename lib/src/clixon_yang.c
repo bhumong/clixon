@@ -91,6 +91,27 @@
 #include "clixon_yang_schema_mount.h"
 #include "clixon_yang_internal.h" /* internal included by this file only, not API */
 
+/* Context for matching an import by module name and capturing its prefix */
+struct import_mod_ctx {
+    const char *modname;
+    const char *prefix;
+};
+
+/* Callback for yang_imports_foreach_scope: match import by module name and capture prefix */
+static int
+import_match_module_cb(yang_stmt *yimport, void *arg)
+{
+    struct import_mod_ctx *c = arg;
+    yang_stmt *yprefix;
+
+    if (strcmp(c->modname, yang_argument_get(yimport)) != 0)
+        return 0;
+    if ((yprefix = yang_find(yimport, Y_PREFIX, NULL)) == NULL)
+        return 0;
+    c->prefix = yang_argument_get(yprefix);
+    return 1; /* stop */
+}
+
 #ifdef XML_EXPLICIT_INDEX
 static int yang_search_index_extension(clixon_handle h, yang_stmt *yext, yang_stmt *ys);
 #endif
@@ -524,12 +545,10 @@ yang_when_get(clixon_handle h,
 {
     map_ptr2ptr *mp = _yang_when_map;
     size_t       len = _yang_when_map_len;
-    yang_stmt   *ys2;
 
-    if ((ys2 = yang_orig_get(ys)) == NULL)
-        ys2 = ys;
-    if (yang_flag_get(ys2, YANG_FLAG_WHEN) != 0x0 && mp != NULL)
-        return clixon_ptr2ptr(mp, len, ys2);
+    if (yang_flag_get(ys, YANG_FLAG_WHEN) != 0x0 && mp != NULL)
+        return clixon_ptr2ptr(mp, len, ys);
+
     return NULL;
 }
 
@@ -547,20 +566,12 @@ yang_when_set(clixon_handle h,
               yang_stmt    *ywhen)
 {
     int          retval = -1;
-    yang_stmt   *ys2;
-    map_ptr2ptr *mp = _yang_when_map;
-    size_t       len = _yang_when_map_len;
-
-    if ((ys2 = yang_orig_get(ys)) == NULL)
-        ys2 = ys;
-    if (clixon_ptr2ptr(mp, len, ys2) == NULL) {
-        assert(yang_flag_set(ys2, YANG_FLAG_WHEN)==0); // XXX
-        if (clixon_ptr2ptr_add(&_yang_when_map, &_yang_when_map_len, ys2, ywhen) < 0)
+    /* Attach to this node; copies inherit via ys_cp_one. */
+    if (clixon_ptr2ptr(_yang_when_map, _yang_when_map_len, ys) == NULL) {
+        if (clixon_ptr2ptr_add(&_yang_when_map, &_yang_when_map_len, ys, ywhen) < 0)
             goto done;
-        yang_flag_set(ys2, YANG_FLAG_WHEN);
+        yang_flag_set(ys, YANG_FLAG_WHEN);
     }
-    else
-        assert(yang_flag_set(ys2, YANG_FLAG_WHEN) == 0); // XXX
     retval = 0;
  done:
     return retval;
@@ -1273,7 +1284,6 @@ ys_cp_one(yang_stmt *ynew,
 
     sz = sizeof(*yold);
     memcpy(ynew, yold, sz);
-    yang_flag_reset(ynew, YANG_FLAG_WHEN); /* Dont inherit WHENs */
     ynew->ys_parent = NULL;
     if (yold->ys_stmt)
         if ((ynew->ys_stmt = calloc(yold->ys_len, sizeof(yang_stmt *))) == NULL){
@@ -1319,6 +1329,8 @@ ys_cp_one(yang_stmt *ynew,
     default:
         break;
     }
+    if (yang_flag_get(ynew, YANG_FLAG_WHEN) != 0x0)
+        yang_when_set(NULL, ynew, yang_when_get(NULL, yold));
     if (yang_flag_get(yold, YANG_FLAG_MYMODULE) != 0x0)
         yang_mymodule_set(ynew, yang_mymodule_get(yold));
     retval = 0;
@@ -1847,25 +1859,30 @@ yang_find_prefix_by_namespace(yang_stmt  *ys,
     yang_stmt *yimport;
     yang_stmt *yprefix;
     int        inext;
+    yang_stmt *yscope; /* lexical origin */
+    yang_stmt *yinst;  /* instantiated node */
+    struct import_mod_ctx ctx;
 
     clixon_debug(CLIXON_DBG_YANG | CLIXON_DBG_DETAIL, "namespace %s", ns);
     if (prefix == NULL){
         clixon_err(OE_YANG, EINVAL, "prefix is NULL");
         goto done;
     }
-    /* First check if namespace is my own module */
-    if ((myns = yang_find_mynamespace(ys)) == NULL)
+    yscope = yang_orig_get(ys) ? yang_orig_get(ys) : ys;
+    yinst = ys;
+    /* First check if namespace is my own module (instantiated) */
+    if ((myns = yang_find_mynamespace(yinst)) == NULL)
         goto done;
     if (strcmp(myns, ns) == 0){
-        *prefix = yang_find_myprefix(ys); /* or NULL? */
+        *prefix = yang_find_myprefix(yinst); /* or NULL? */
         goto found;
     }
     /* Next, find namespaces in imported modules */
-    yspec = ys_spec(ys);
+    yspec = ys_spec(yscope);
     if ((ymod = yang_find_module_by_namespace(yspec, ns)) == NULL)
         goto notfound;
     modname = yang_argument_get(ymod);
-    my_ymod = ys_module(ys);
+    my_ymod = ys_module(yinst);
     /* Loop through import statements to find a match with ymod */
     inext = 0;
     while ((yimport = yn_iter(my_ymod, &inext)) != NULL) {
@@ -1875,6 +1892,17 @@ yang_find_prefix_by_namespace(yang_stmt  *ys,
             *prefix = yang_argument_get(yprefix);
             goto found;
         }
+    }
+    /* If not found, also check lexical module/import scope upwards */
+    ctx.modname = modname;
+    ctx.prefix = NULL;
+    if (yang_imports_foreach_scope(yscope, yspec,
+                                   import_match_module_cb,
+                                   &ctx) < 0)
+        goto done;
+    if (ctx.prefix){
+        *prefix = (char*)ctx.prefix;
+        goto found;
     }
  notfound:
     retval = 0; /* not found */
