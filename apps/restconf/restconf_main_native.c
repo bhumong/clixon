@@ -1209,11 +1209,15 @@ main(int    argc,
             break;
         case 'D' :  /* debug. Note this overrides any setting in the config */
             /* Try first symbolic, then numeric match */
-            if ((d = clixon_debug_str2key(optarg)) < 0 &&
-                sscanf(optarg, "%d", &d) != 1){
-                usage(h, argv[0]);
+            if ((d = clixon_debug_str2key(optarg)) < 0){
+                uint32_t u;
+                if (parse_uint32(optarg, &u, NULL) <= 0)
+                    usage(h, argv[0]);
+                else
+                    dbg |= u;
             }
-            dbg |= d;
+            else
+                dbg |= d;
             break;
          case 'f': /* override config file */
             if (!strlen(optarg))
