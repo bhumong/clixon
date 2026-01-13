@@ -160,15 +160,11 @@ cache_autocli_generate(clixon_handle h,
             goto done;
         goto fail;
     }
-    if ((yspec = yang_find(ydomain, Y_SPEC, spec)) == NULL
-#ifdef YANG2CLI_UNDETERMINISTIC_SPEC
-        && (yspec = yang_find(ydomain, Y_SPEC, NULL)) == NULL
-#endif
-        ){
-            if (netconf_operation_failed(cbret, "application", "Yspec %s/%s not found", domain, spec) < 0)
-                goto done;
-            goto fail;
-        }
+    if ((yspec = yang_find(ydomain, Y_SPEC, spec)) == NULL){
+        if (netconf_operation_failed(cbret, "application", "Yspec %s/%s not found", domain, spec) < 0)
+            goto done;
+        goto fail;
+    }
     if ((ymod = yang_find_module_by_name_revision(yspec, module, revision)) == NULL &&
         (ymod = yang_find_module_by_name(yspec, module)) == NULL){
         if (netconf_operation_failed(cbret, "application", "Module or submodule %s@%snot found", module, revision) < 0)
@@ -547,7 +543,7 @@ backend_autocli_clear_cache(clixon_handle h)
  * @retval     0       OK
  * @retval    -1       Error
  */
-int
+static int
 from_client_clixon_cache(clixon_handle h,
                          cxobj        *xe,
                          cbuf         *cbret,
@@ -597,5 +593,24 @@ from_client_clixon_cache(clixon_handle h,
  done:
     if (cberr)
         cbuf_free(cberr);
+    return retval;
+}
+
+/*! Init clixon cache rpc:s
+ *
+ * @param[in]  h     Clixon handle
+ * @retval     0     OK
+ * @retval    -1     Error (fatal)
+ */
+int
+backend_clixon_cache_init(clixon_handle h)
+{
+    int retval = -1;
+
+    if (rpc_callback_register(h, from_client_clixon_cache, NULL,
+                              CLIXON_LIB_NS, "clixon-cache") < 0)
+        goto done;
+    retval = 0;
+ done:
     return retval;
 }
