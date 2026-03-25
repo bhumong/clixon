@@ -108,9 +108,10 @@ netconf_add_request_attr(cxobj *xrpc,
     int    retval = -1;
     cxobj *xa;
     cxobj *xa2 = NULL;
+    int    ix;
 
-    xa = NULL;
-    while ((xa = xml_child_each(xrpc, xa, CX_ATTR)) != NULL){
+    ix = 0;
+    while ((xa = xml_child_iter(xrpc, &ix, CX_ATTR)) != NULL) {
         /* If attribute already exists, dont copy it */
         if (xml_find_type(xrep, NULL, xml_name(xa), CX_ATTR) != NULL)
             continue; /* Skip already present (dont overwrite) */
@@ -158,6 +159,7 @@ netconf_hello_msg(clixon_handle h,
     int     foundbase_11 = 0;
     int     foundprivcand = 0;
     char   *body;
+    int     ix;
 
     clixon_debug(CLIXON_DBG_NETCONF, "");
     _netconf_hello_nr++;
@@ -169,8 +171,8 @@ netconf_hello_msg(clixon_handle h,
         goto done;
     /* Each peer MUST send at least the base NETCONF capability, "urn:ietf:params:netconf:base:1.1"*/
     if ((xcap = xml_find_type(xn, NULL, "capabilities", CX_ELMNT)) != NULL) {
-        x = NULL;
-        while ((x = xml_child_each(xcap, x, CX_ELMNT)) != NULL) {
+        ix = 0;
+        while ((x = xml_child_iter(xcap, &ix, CX_ELMNT)) != NULL) {
             if (strcmp(xml_name(x), "capability") != 0)
                 continue;
             if ((body = xml_body(x)) == NULL)
@@ -595,6 +597,7 @@ netconf_terminate(clixon_handle h)
     /* Delete all plugins, and RPC callbacks */
     clixon_plugin_module_exit(h);
     clicon_rpc_close_session(h);
+    xml_exit(h);
     yang_exit(h);
     if ((nsctx = clicon_nsctx_global_get(h)) != NULL)
         cvec_free(nsctx);
@@ -767,6 +770,7 @@ main(int    argc,
      */
     clixon_log_init(h, __PROGRAM__, dbg?LOG_DEBUG:LOG_INFO, logdst);
     clixon_debug_init(h, dbg);
+    xml_init(h);
     yang_init(h);
 
     /* Find, read and parse configfile */

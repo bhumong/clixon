@@ -442,6 +442,7 @@ find_first_op_recurse(cxobj               *x,
     int    retval = -1;
     char  *opstr = NULL;
     cxobj *xc;
+    int    ix;
     int    ret;
 
     if (*op != OP_NONE)
@@ -454,8 +455,8 @@ find_first_op_recurse(cxobj               *x,
         if (xml_operation(opstr, op) < 0)
             goto done;
     if (*op == OP_NONE){
-        xc = NULL;
-        while ((xc = xml_child_each(x, xc, CX_ELMNT)) != NULL) {
+        ix = 0;
+        while ((xc = xml_child_iter(x, &ix, CX_ELMNT)) != NULL) {
             if ((ret = find_first_op_recurse(xc, op, cbret)) < 0)
                 goto done;
             if (ret == 0)
@@ -506,12 +507,12 @@ choice_other_match(cxobj              *x0,
 {
     int        retval = -1;
     cxobj     *x0c;
-    cxobj     *x0prev;
     yang_stmt *y0c;
     yang_stmt *y0case;
     yang_stmt *y0choice;
     yang_stmt *y1case = NULL;
     yang_stmt *y1choice = NULL;
+    int        ix;
     int        ret;
 
     if ((ret = find_first_op_recurse(x1c, &op, cbret)) < 0)
@@ -522,16 +523,14 @@ choice_other_match(cxobj              *x0,
         goto ok;
     if (yang_choice_case_get(y1c, &y1case, &y1choice) == 0)
         goto ok;
-    x0prev = NULL;
-    x0c = NULL;
-    while ((x0c = xml_child_each(x0, x0c, CX_ELMNT)) != NULL) {
+
+    ix = 0;
+    while ((x0c = xml_child_iter(x0, &ix, CX_ELMNT)) != NULL) {
         if ((y0c = xml_spec(x0c)) == NULL ||
             yang_parent_get(y0c) == NULL){
-            x0prev = x0c;
             continue;
         }
         if (yang_choice_case_get(y0c, &y0case, &y0choice) == 0){
-            x0prev = x0c;
             continue;
         }
         /* Check if x0/y0 is part of other choice/case than y1 recursively , if so purge */
@@ -542,7 +541,7 @@ choice_other_match(cxobj              *x0,
             case OP_CREATE:
                 if (xml_purge(x0c) < 0)
                     goto done;
-                x0c = x0prev;
+                ix--;
                 continue;
                 break;
             case OP_DELETE:
@@ -555,7 +554,6 @@ choice_other_match(cxobj              *x0,
                 break;
             }
         }
-        x0prev = x0c;
     }
  ok:
     retval = 1;
@@ -630,6 +628,7 @@ text_modify(clixon_handle       h,
     int        ismount = 0;
     yang_stmt *mount_yspec = NULL;
     char      *ns;
+    int        ix;
     int        ret;
 
     if (x1 == NULL){
@@ -987,9 +986,11 @@ text_modify(clixon_handle       h,
                 if ((x0 = xml_new(x1name, NULL, CX_ELMNT)) == NULL)
                     goto done;
                 xml_spec_set(x0, y0);
-#ifdef XML_PARENT_CANDIDATE
+                if (xml_parent_candidate(x0) != NULL){
+                    clixon_err(OE_XML, 0, "xml_parent_candidate is not NULL");
+                    goto done;
+                }
                 xml_parent_candidate_set(x0, x0p);
-#endif
                 changed++;
                 /* Get namespace from x1
                  * Check if namespace exists in x0 parent
@@ -1009,7 +1010,8 @@ text_modify(clixon_handle       h,
             }
             x1c = NULL;
             i = 0;
-            while ((x1c = xml_child_each(x1, x1c, CX_ELMNT)) != NULL) {
+            ix = 0;
+            while ((x1c = xml_child_iter(x1, &ix, CX_ELMNT)) != NULL) {
                 x1cname = xml_name(x1c);
                 /* Get yang spec of the child by child matching */
                 ns = NULL;
@@ -1069,7 +1071,8 @@ text_modify(clixon_handle       h,
              */
             x1c = NULL;
             i = 0;
-            while ((x1c = xml_child_each(x1, x1c, CX_ELMNT)) != NULL) {
+            ix = 0;
+            while ((x1c = xml_child_iter(x1, &ix, CX_ELMNT)) != NULL) {
                 x0c = x0vec[i++];
                 x1cname = xml_name(x1c);
                 ns = NULL;
@@ -1108,9 +1111,7 @@ text_modify(clixon_handle       h,
                     goto done;
                 if (xml_flag(x0, XML_FLAG_NONE) == 0x0 ||
                     xml_child_nr_type(x0, CX_ELMNT) > 0) {
-#ifdef XML_PARENT_CANDIDATE
                     xml_parent_candidate_set(x0, NULL);
-#endif
                     if (xml_insert(x0p, x0, insert, keystr, nscx1) < 0)
                         goto done;
                     xml_flag_set(x0, XML_FLAG_ADD);
@@ -1155,8 +1156,10 @@ text_modify(clixon_handle       h,
     if (nscx1)
         xml_nsctx_free(nscx1);
     /* Remove dangling added objects */
-    if (changed && x0 && xml_parent(x0)==NULL)
+    if (changed && x0 && xml_parent(x0)==NULL){
+        xml_parent_candidate_set(x0, NULL);
         xml_purge(x0);
+    }
     if (x0vec)
         free(x0vec);
     return retval;
@@ -1200,6 +1203,7 @@ text_modify_top(clixon_handle       h,
     yang_stmt *ymod;/* yang module */
     char      *opstr = NULL;
     char      *createstr = NULL;
+    int        ix;
     int        ret;
 
     /* Check for operations embedded in tree according to netconf */
@@ -1258,9 +1262,9 @@ text_modify_top(clixon_handle       h,
     /* Special case top-level replace */
     else if (op == OP_REPLACE || op == OP_DELETE){
         if (createstr != NULL){
-            x0c = NULL;
             /* Specialization of xml_default_nopresence for skiptop and mode=0 */
-            while ((x0c = xml_child_each(x0t, x0c, CX_ELMNT)) != NULL) {
+            ix = 0;
+            while ((x0c = xml_child_iter(x0t, &ix, CX_ELMNT)) != NULL) {
                 if ((ret = xml_default_nopresence(x0c, 0, 0)) < 0)
                     goto done;
                 if (ret == 0)
@@ -1283,8 +1287,8 @@ text_modify_top(clixon_handle       h,
                 goto done;
     }
     /* Loop through children of the modification tree */
-    x1c = NULL;
-    while ((x1c = xml_child_each(x1t, x1c, CX_ELMNT)) != NULL) {
+    ix = 0;
+    while ((x1c = xml_child_iter(x1t, &ix, CX_ELMNT)) != NULL) {
         x1cname = xml_name(x1c);
         /* Get yang spec of the child */
         yc = NULL;
@@ -1523,14 +1527,23 @@ xmldb_put(clixon_handle       h,
 #endif
     /* Write back to datastore cache if first time */
     xmldb_empty_set(de, xml_child_nr(xmldb_cache_get(de)) == 0);
-    /* Write cache to file unless volatile (ie stop syncing to store) */
-    if (xmldb_volatile_get(de) == 0){
+    /* Write cache to file and clear flags based on cache status:
+     * FILE / FILE_INMEM: flush to disk.
+     * INMEM: keep only in-memory (volatile), skip file write.
+     * FILE: additionally discard in-mem cache after writing to disk.
+     */
+    if (xmldb_cache_status_get(de) != XMLDB_CACHE_INMEM){
         if (xmldb_write_cache2file(h, db) < 0)
             goto done;
         /* Clear flags from previous steps + dirty */
         if (xml_apply(x0, CX_ELMNT, (xml_applyfn_t*)xml_flag_reset,
                       (void*)(XML_FLAG_NONE|XML_FLAG_ADD|XML_FLAG_DEL|XML_FLAG_CHANGE|XML_FLAG_CACHE_DIRTY)) < 0)
             goto done;
+        /* FILE-only: free in-mem cache after persisting to disk */
+        if (xmldb_cache_status_get(de) == XMLDB_CACHE_FILE){
+            xml_free(xmldb_cache_get(de));
+            xmldb_cache_set(de, NULL);
+        }
     }
     else {
         /* Clear flags from previous steps */

@@ -91,14 +91,15 @@ static int
 tleaf(cxobj *x)
 {
     cxobj *xc;
+    int    ix;
 
     if (xml_type(x) != CX_ELMNT)
         return 0;
     if (xml_child_nr_notype(x, CX_ATTR) != 1)
         return 0;
     /* From here exactly one noattr child, get it */
-    xc = NULL;
-    while ((xc = xml_child_each(x, xc, -1)) != NULL)
+    ix = 0;
+    while ((xc = xml_child_iter(x, &ix, -1)) != NULL)
         if (xml_type(xc) != CX_ATTR)
             break;
     if (xc == NULL)
@@ -129,6 +130,7 @@ text_wdef(cxobj            *x,
     cxobj     *xc;
     yang_stmt *yc;
     int        config;
+    int        ix;
     int        ret;
 
     switch (wdef){
@@ -142,8 +144,8 @@ text_wdef(cxobj            *x,
             if (yang_find(y, Y_PRESENCE, NULL) == NULL){
                 keep = 0;
                 /* Loop thru children */
-                xc = NULL;
-                while ((xc = xml_child_each(x, xc, CX_ELMNT)) != NULL) {
+                ix = 0;
+                while ((xc = xml_child_iter(x, &ix, CX_ELMNT)) != NULL) {
                     if ((yc = xml_spec(xc)) != NULL){
                         if ((ret = text_wdef(xc, yc, wdef)) < 0)
                             goto done;
@@ -226,6 +228,7 @@ text2file(cxobj            *xn,
     cg_var    *cvi;
     cvec      *cvk = NULL; /* vector of index keys */
     cbuf      *cbb = NULL;
+    int        ix;
 #ifndef TEXT_SYNTAX_NOPREFIX
     yang_stmt *yp = NULL;
     yang_stmt *ymod;
@@ -280,8 +283,8 @@ text2file(cxobj            *xn,
             (*fn)(f, "%*s]\n", PRETTYPRINT_INDENT*(level), "");
         }
     }
-    xc = NULL;     /* count children (elements and bodies, not attributes) */
-    while ((xc = xml_child_each(xn, xc, -1)) != NULL)
+    ix = 0;
+    while ((xc = xml_child_iter(xn, &ix, -1)) != NULL)
         if (xml_type(xc) == CX_ELMNT || xml_type(xc) == CX_BODY)
             children++;
     if (children == 0){ /* If no children print line */
@@ -341,8 +344,8 @@ text2file(cxobj            *xn,
         (*fn)(f, " {\n");
     else
         (*fn)(f, " ");
-    xc = NULL;
-    while ((xc = xml_child_each(xn, xc, -1)) != NULL){
+    ix = 0;
+    while ((xc = xml_child_iter(xn, &ix, -1)) != NULL) {
         if (xml_type(xc) == CX_ELMNT || xml_type(xc) == CX_BODY){
             if (yn && yang_key_match(yn, xml_name(xc), NULL))
                 continue; /* Skip keys, already printed */
@@ -429,6 +432,7 @@ text2cbuf(cbuf             *cb,
     cbuf      *cbb = NULL;
     int        level1;
     char      *prefix = NULL;
+    int        ix;
     int        ret;
 
     if (xn == NULL || cb == NULL){
@@ -471,8 +475,8 @@ text2cbuf(cbuf             *cb,
             cprintf(cb, "%*s\n", level1, "]");
         }
     }
-    xc = NULL;     /* count children (elements and bodies, not attributes) */
-    while ((xc = xml_child_each(xn, xc, -1)) != NULL)
+    ix = 0;
+    while ((xc = xml_child_iter(xn, &ix, -1)) != NULL)
         if (xml_type(xc) == CX_ELMNT || xml_type(xc) == CX_BODY)
             children++;
     if (children == 0){ /* If no children print line */
@@ -537,8 +541,8 @@ text2cbuf(cbuf             *cb,
         cprintf(cb, " {\n");
     else
         cprintf(cb, " ");
-    xc = NULL;
-    while ((xc = xml_child_each(xn, xc, -1)) != NULL){
+    ix = 0;
+    while ((xc = xml_child_iter(xn, &ix, -1)) != NULL) {
         if (xml_type(xc) == CX_ELMNT || xml_type(xc) == CX_BODY){
             if (yn && yang_key_match(yn, xml_name(xc), NULL))
                 continue; /* Skip keys, already printed */
@@ -589,12 +593,13 @@ clixon_text2file(FILE             *f,
     cxobj *xc;
     int    leafl = 0;
     char  *leaflname = NULL;
+    int    ix;
 
     if (fn == NULL)
         fn = fprintf;
     if (skiptop){
-        xc = NULL;
-        while ((xc = xml_child_each(xn, xc, CX_ELMNT)) != NULL)
+        ix = 0;
+        while ((xc = xml_child_iter(xn, &ix, CX_ELMNT)) != NULL)
             if (text2file(xc, fn, f, level, autocliext, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
     }
@@ -628,10 +633,11 @@ clixon_text2cbuf(cbuf             *cb,
     cxobj *xc;
     int    leafl = 0;
     char  *leaflname = NULL;
+    int    ix;
 
     if (skiptop){
-        xc = NULL;
-        while ((xc = xml_child_each(xn, xc, CX_ELMNT)) != NULL)
+        ix = 0;
+        while ((xc = xml_child_iter(xn, &ix, CX_ELMNT)) != NULL)
             if (text2cbuf(cb, xc, level, NULL, autocliext, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
     }
@@ -689,6 +695,8 @@ text_diff2cbuf_ordered_by_user(cbuf      *cb,
                                cxobj     *x1,
                                cxobj     *x0c,
                                cxobj     *x1c,
+                               int        ix0c,
+                               int        ix1c,
                                yang_stmt *yc,
                                int        level,
                                int        skiptop)
@@ -696,17 +704,22 @@ text_diff2cbuf_ordered_by_user(cbuf      *cb,
     int    retval = 1;
     cxobj *xi;
     cxobj *xj;
+    int    ixi;
+    int    ixj;
 
     xj = x1c;
+    ixj = ix1c;
     do {
         xml_flag_set(xj, XML_FLAG_ADD);
-    } while ((xj = xml_child_each(x1, xj, CX_ELMNT)) != NULL &&
+    } while ((xj = xml_child_iter(x1, &ixj, CX_ELMNT)) != NULL &&
              xml_spec(xj) == yc);
     /* If in both sets, unmark add/del */
     xi = x0c;
+    ixi = ix0c;
     do {
         xml_flag_set(xi, XML_FLAG_DEL);
         xj = x1c;
+        ixj = ix1c;
         do {
             if (xml_flag(xj, XML_FLAG_ADD) &&
                 xml_cmp(xi, xj, 0, 0, NULL) == 0){
@@ -718,10 +731,10 @@ text_diff2cbuf_ordered_by_user(cbuf      *cb,
                 break;
             }
         }
-        while ((xj = xml_child_each(x1, xj, CX_ELMNT)) != NULL &&
+        while ((xj = xml_child_iter(x1, &ixj, CX_ELMNT)) != NULL &&
                xml_spec(xj) == yc);
     }
-    while ((xi = xml_child_each(x0, xi, CX_ELMNT)) != NULL &&
+    while ((xi = xml_child_iter(x0, &ixi, CX_ELMNT)) != NULL &&
            xml_spec(xi) == yc);
 
     retval = 0;
@@ -786,6 +799,10 @@ text_diff2cbuf(cbuf             *cb,
     cxobj     *xi;
     cxobj     *xj;
     int        extflag;
+    int        ix0c;
+    int        ix1c;
+    int        ixi;
+    int        ixj;
 
     level1 = level*PRETTYPRINT_INDENT;
     if ((y0 = xml_spec(x0)) != NULL){
@@ -794,20 +811,20 @@ text_diff2cbuf(cbuf             *cb,
 #endif
     }
     /* Traverse x0 and x1 in lock-step */
-    x0c = x1c = NULL;
-    x0c = xml_child_each(x0, x0c, CX_ELMNT);
-    x1c = xml_child_each(x1, x1c, CX_ELMNT);
+    ix0c = ix1c = 0;
+    x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
+    x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
     for (;;) {
         /* Check if one or both subtrees are NULL */
         if (x0c == NULL && x1c == NULL)
             goto ok;
         /* Skip if marked as DENY */
         if (x0c && xml_flag(x0c, XML_FLAG_DENY) != 0){
-            x0c = xml_child_each(x0, x0c, CX_ELMNT);
+            x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
             continue;
         }
         else if (x1c && xml_flag(x1c, XML_FLAG_DENY) != 0){
-            x1c = xml_child_each(x1, x1c, CX_ELMNT);
+            x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
             continue;
         }
         y0c = NULL;
@@ -817,7 +834,7 @@ text_diff2cbuf(cbuf             *cb,
             if (yang_extension_value(y0c, "ignore-compare", CLIXON_LIB_NS, &extflag, NULL) < 0)
                 goto done;
             if (extflag){ /* skip */
-                x0c = xml_child_each(x0, x0c, CX_ELMNT);
+                x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
                 continue;
             }
         }
@@ -825,7 +842,7 @@ text_diff2cbuf(cbuf             *cb,
             if (yang_extension_value(y1c, "ignore-compare", CLIXON_LIB_NS, &extflag, NULL) < 0)
                 goto done;
             if (extflag){ /* skip */
-                x1c = xml_child_each(x1, x1c, CX_ELMNT);
+                x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
                 continue;
             }
         }
@@ -841,7 +858,7 @@ text_diff2cbuf(cbuf             *cb,
             }
             if (text2cbuf(cb, x1c, level+1, "+", 0, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
-            x1c = xml_child_each(x1, x1c, CX_ELMNT);
+            x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
             continue;
         }
         else if (x1c == NULL){
@@ -856,7 +873,7 @@ text_diff2cbuf(cbuf             *cb,
             }
             if (text2cbuf(cb, x0c, level+1, "-", 0, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
-            x0c = xml_child_each(x0, x0c, CX_ELMNT);
+            x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
             continue;
         }
         /* Both x0c and x1c exists, check if they are yang-equal. */
@@ -864,13 +881,14 @@ text_diff2cbuf(cbuf             *cb,
         b0 = xml_body(x0c);
         b1 = xml_body(x1c);
         if (eq && y0c && y1c && y0c == y1c && yang_find(y0c, Y_ORDERED_BY, "user")){
-            if (text_diff2cbuf_ordered_by_user(cb, x0, x1, x0c, x1c, y0c,
+            if (text_diff2cbuf_ordered_by_user(cb, x0, x1, x0c, x1c, ix0c, ix1c, y0c,
                                                level, skiptop) < 0)
                 goto done;
             /* Add all in x0 marked as DELETE in x0vec
              * Flags can remain: XXX should apply to all
              */
             xi = x0c;
+            ixi = ix0c;
             do {
                 if (xml_flag(xi, XML_FLAG_DEL)){
                     xml_flag_reset(xi, XML_FLAG_DEL);
@@ -887,12 +905,14 @@ text_diff2cbuf(cbuf             *cb,
                         goto done;
                 }
             }
-            while ((xi = xml_child_each(x0, xi, CX_ELMNT)) != NULL &&
+            while ((xi = xml_child_iter(x0, &ixi, CX_ELMNT)) != NULL &&
                    xml_spec(xi) == y0c);
             x0c = xi;
+            ix0c = ixi;
 
             /* Add all in x1 marked as ADD in x1vec */
             xj = x1c;
+            ixj = ix1c;
             do {
                 if (xml_flag(xj, XML_FLAG_ADD)){
                     xml_flag_reset(xj, XML_FLAG_ADD);
@@ -909,9 +929,10 @@ text_diff2cbuf(cbuf             *cb,
                         goto done;
                 }
             }
-            while ((xj = xml_child_each(x1, xj, CX_ELMNT)) != NULL &&
+            while ((xj = xml_child_iter(x1, &ixj, CX_ELMNT)) != NULL &&
                    xml_spec(xj) == y1c);
             x1c = xj;
+            ix1c = ixj;
             continue;
         }
         else if (eq < 0){
@@ -926,7 +947,7 @@ text_diff2cbuf(cbuf             *cb,
             }
             if (text2cbuf(cb, x0c, level+1, "-", 0, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
-            x0c = xml_child_each(x0, x0c, CX_ELMNT);
+            x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
             continue;
         }
         else if (eq > 0){
@@ -941,7 +962,7 @@ text_diff2cbuf(cbuf             *cb,
             }
             if (text2cbuf(cb, x1c, level+1, "+", 0, WITHDEFAULTS_EXPLICIT, &leafl, &leaflname) < 0)
                 goto done;
-            x1c = xml_child_each(x1, x1c, CX_ELMNT);
+            x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
             continue;
         }
         else{ /* equal */
@@ -995,8 +1016,8 @@ text_diff2cbuf(cbuf             *cb,
                 goto done;
         }
         /* Get next */
-        x0c = xml_child_each(x0, x0c, CX_ELMNT);
-        x1c = xml_child_each(x1, x1c, CX_ELMNT);
+        x0c = xml_child_iter(x0, &ix0c, CX_ELMNT);
+        x1c = xml_child_iter(x1, &ix1c, CX_ELMNT);
     } /* for */
  ok:
     if (nr)
@@ -1053,6 +1074,7 @@ text_populate_list(cxobj *xn)
     cvec      *cvk; /* vector of index keys */
     cg_var    *cvi = NULL;
     char      *namei;
+    int        ix;
 
     if ((yn = xml_spec(xn)) == NULL)
         goto ok;
@@ -1082,8 +1104,8 @@ text_populate_list(cxobj *xn)
         if (xml_sort(xn) < 0)
             goto done;
     }
-    xc = NULL;
-    while ((xc = xml_child_each(xn, xc, CX_ELMNT)) != NULL) {
+    ix = 0;
+    while ((xc = xml_child_iter(xn, &ix, CX_ELMNT)) != NULL) {
         if (text_populate_list(xc) < 0)
             goto done;
     }
@@ -1120,6 +1142,8 @@ _text_syntax_parse(const char *str,
     cbuf                   *cberr = NULL;
     int                     failed = 0; /* yang assignment */
     cxobj                  *xc;
+    int                     ix;
+    int                     ixc;
     int                     ret;
 
     if (clixon_debug_get() & CLIXON_DBG_DETAIL)
@@ -1142,9 +1166,8 @@ _text_syntax_parse(const char *str,
             clixon_err(OE_JSON, 0, "TEXT SYNTAX parser error with no error code (should not happen)");
         goto done;
     }
-
-    x = NULL;
-    while ((x = xml_child_each(ts.ts_xtop, x, CX_ELMNT)) != NULL) {
+    ix = 0;
+    while ((x = xml_child_iter(ts.ts_xtop, &ix, CX_ELMNT)) != NULL) {
         /* Populate, ie associate xml nodes with yang specs
          */
         switch (yb){
@@ -1167,8 +1190,8 @@ _text_syntax_parse(const char *str,
             break;
         } /* switch */
         /* Look for YANG lists nodes and convert bodies to keys */
-        xc = NULL;
-        while ((xc = xml_child_each(x, xc, CX_ELMNT)) != NULL)
+        ixc = 0;
+        while ((xc = xml_child_iter(x, &ixc, CX_ELMNT)) != NULL)
             if (text_populate_list(xc) < 0)
                 goto done;
     }

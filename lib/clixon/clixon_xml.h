@@ -213,7 +213,6 @@ enum xml_stats_enum{
     XML_STATS_CHILDVEC,
     XML_STATS_NS_CACHE,
     XML_STATS_CV,
-    XML_STATS_SEARCH_INDEX,
     XML_STATS_VALUE,
 };
 typedef enum xml_stats_enum xml_stats_enum;
@@ -254,11 +253,8 @@ int       nscache_clear(cxobj *x);
 int       nscache_replace(cxobj *x, cvec *ns);
 cxobj    *xml_parent(cxobj *xn);
 int       xml_parent_set(cxobj *xn, cxobj *parent);
-#ifdef XML_PARENT_CANDIDATE
 cxobj    *xml_parent_candidate(cxobj *xn);
 int       xml_parent_candidate_set(cxobj *xn, cxobj *parent);
-#endif /* XML_PARENT_CANDIDATE */
-
 uint16_t  xml_flag(cxobj *xn, uint16_t flag);
 int       xml_flag_set(cxobj *xn, uint16_t flag);
 int       xml_flag_reset(cxobj *xn, uint16_t flag);
@@ -276,9 +272,9 @@ cxobj    *xml_child_i(cxobj *xn, int i);
 cxobj    *xml_child_i_type(cxobj *xn, int i, enum cxobj_type type);
 cxobj    *xml_child_i_set(cxobj *xt, int i, cxobj *xc);
 int       xml_child_order(cxobj *xn, cxobj *xc);
-int       xml_vector_decrement(cxobj *x, int nr);
 cxobj    *xml_child_each(cxobj *xparent, cxobj *xprev,  enum cxobj_type type);
-cxobj    *xml_child_each_attr(cxobj *xparent, cxobj *xprev);
+cxobj    *xml_child_iter_attr(cxobj *xparent, int *inext);
+cxobj    *xml_child_iter(cxobj *xparent, int *inext, enum cxobj_type type);
 int       xml_child_insert_pos(cxobj *x, cxobj *xc, int pos);
 int       xml_childvec_set(cxobj *x, int len);
 cxobj   **xml_childvec_get(cxobj *x);
@@ -329,6 +325,8 @@ char     *xml_operation2str(enum operation_type op);
 int       xml_attr_insert2val(const char *instr, enum insert_type *ins);
 cxobj    *xml_add_attr(cxobj *xn, const char *name, const char *value,
                        const char *prefix, const char *ns);
+int       xml_init(clixon_handle h);
+int       xml_exit(clixon_handle h);
 #ifdef XML_EXPLICIT_INDEX
 int       xml_search_index_p(cxobj *x);
 int       xml_search_vector_get(cxobj *x, const char *name, clixon_xvec **xvec);

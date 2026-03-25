@@ -129,6 +129,7 @@ clixon_client_init(const char *config_file)
     /* Set clixon config file - reuse the one in the main installation */
     clicon_option_str_set(h, "CLICON_CONFIGFILE",
                           config_file?(char*)config_file:CLIXON_DEFAULT_CONFIG);
+    xml_init(h);
     yang_init(h);
     /* Find, read and parse configfile */
     if (clicon_options_main(h) < 0)
@@ -400,13 +401,14 @@ clixon_xml_bottom(cxobj  *xtop,
     cxobj *x;
     cxobj *xp;
     cxobj *xc = NULL;
+    int    ix;
 
     xp = xtop;
     while (xp != NULL){
         /* Find child, if many, one which is not a key, if any */
         xc = NULL;
-        x = NULL;
-        while ((x = xml_child_each(xp, x, CX_ELMNT)) != NULL)
+        ix = 0;
+        while ((x = xml_child_iter(xp, &ix, CX_ELMNT)) != NULL)
             xc = x;
         /* xc is last XXX */
         if (xc == NULL)

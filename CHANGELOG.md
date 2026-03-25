@@ -1,6 +1,7 @@
 # Clixon Changelog
 
 * [7.8.0](#780) Expected: May 2026
+* [7.7.0](#770) 21 February 2026
 * [7.6.0](#760) 21 November 2025
 * [7.5.0](#750) 29 July 2025
 * [7.4.0](#740) 3 April 2025
@@ -21,9 +22,28 @@ Expected: May 2026
 
 ### Features
 
+* New: XPath translate()
+* New: [Default values for YANG leaf-list](https://github.com/clicon/clixon/issues/664)
+* Enumerated types now appear in CLI help texts, see eg https://github.com/clicon/clixon/issues/183
+* New xmldb-cache-status: inmem, file and file-inmem to configure each datastore cache behavior
+* Optimization of XML config memory footprint
+  * Reduction by more than 50%, down to between 38% - 48% of original size depending on config
+  * Added xmldb status to remove startup in-memory cache
+  * Reduced size of `struct xml` struct
+    * Condensed type, sort index, flags and prefix length into a single 64-bit field
+    * Unified body value and child vector into a 64-bit single union
+    * Combined prefix and name into one field, removed name from xml-body
+    * Moved child vector into separate sidecar struct
+    * Removed x_up_candidate and replaced it with ptr map
+    * Moved explicit search-index to ptr map
+    * Removed in-struct iterator
+  * Changed child iterator API: use xml_childiter() instead of xml_child_each()
+    * Configure with `--enable-child-each-wrapper option` to enable optimization
+
 * show memory: Added detailed statistics for config datastores (CLI and RPC)
 * New `clixon-config@2026-03-01.yang` revision
    * Added `CLICON_VALIDATE_TARGET_STATE`
+   * Added `CLICON_XMLDB_CACHE_STATUS`
 * New `clixon-lib@2026-03-01.yang` revision
    * Extended stats rpc with `xml-type` parameter
 
@@ -37,13 +57,36 @@ Users may have to change how they access the system
 
 Developers may need to change their code
 
+* Major API change: Replace `xml_child_each()` with `xml_child_iter()` as follows:
+  * From:
+  ```
+    cxobj   *xc;
+    xc = NULL;
+    while ((xc = xml_child_each(xt, xc, elmnt)) != NULL) {
+  ```
+  * To:
+    ```
+    cxobj   *xc;
+    int      ix;
+
+    ix = 0;
+    while ((xc = xml_child_iter(xt, &ix, elmnt)) != NULL) {
+    ```
+  * Run: `configure --enable-child-each-wrapper` after migration
+  * Replace `xml_child_each_attr()` --> `xml_child_iter_attr()`
+* Replace `volatile` API with more generic `cache-status` API:
+  * Example changes:
+    * `xmldb_volatile_get(de)` --> `xmldb_cache_status_get(de) == XMLDB_CACHE_INMEM`
+    * `xmldb_volatile_set(de, 1)` --> `xmldb_cache_status_set(de, XMLDB_CACHE_INMEM)`
 * Replace `xml_merge()` with `xml_merge1()`
      * Example change: `xml_merge(...,r)` --> `xml_merge1(...,0,r)`
 * Replace `xml_yang_validate_all_top()` with `xml_yang_validate_all_state()'
      * Example change: `xml_yang_validate_all_top(h,x,r)` --> `xml_yang_validate_all_state(h,x,0,r)`
+* Removed `XMLDB_CANDIDATE_INMEM`, use `CLICON_XMLDB_CACHE_STATUS` instead
 
 ### Corrected Bugs
 
+* Fixed: [cli description should be enumeration's desc not the leaf's. for yang enum type](https://github.com/clicon/clixon/issues/183)
 * Fixed: [CLI: union leafref not supported in completion](https://github.com/clicon/clixon/issues/558)
 * Fixed: [leafref in new type no work in union type](https://github.com/clicon/clixon/issues/388)
 * Fixed: [Validation of YANG leafref within union does not work](https://github.com/clicon/clixon/issues/498)

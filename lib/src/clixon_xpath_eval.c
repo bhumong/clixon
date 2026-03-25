@@ -333,8 +333,8 @@ nodetest_recursive(cxobj      *xn,
     cxobj **vec = *vec0;
     size_t  veclen = *vec0len;
 
-    xsub = NULL;
-    while ((xsub = xml_child_each(xn, xsub, node_type)) != NULL) {
+    int ixsub = 0;
+    while ((xsub = xml_child_iter(xn, &ixsub, node_type)) != NULL) {
         if (nodetest_eval(xsub, nodetest, nsc, localonly) == 1){
             clixon_debug(CLIXON_DBG_XPATH | CLIXON_DBG_DETAIL, "%x %x", flags, xml_flag(xsub, flags));
             if (flags==0x0 || xml_flag(xsub, flags))
@@ -382,6 +382,7 @@ xp_eval_step(xp_ctx     *xc0,
     cxobj      *xp;
     cxobj     **vec = NULL;
     size_t      veclen = 0;
+    int         ix;
     xpath_tree *nodetest = xs->xs_c0;
     xp_ctx     *xc = NULL;
     int         ret;
@@ -437,7 +438,8 @@ xp_eval_step(xp_ctx     *xc0,
                         free(vec0);
                 }
                 else if (ret == 0){/* regular code, no optimization made */
-                    while ((x = xml_child_each(xv, x, CX_ELMNT)) != NULL) {
+                    ix = 0;
+                    while ((x = xml_child_iter(xv, &ix, CX_ELMNT)) != NULL) {
                         /* xs->xs_c0 is nodetest */
                         if (nodetest == NULL ||
                             nodetest_eval(x, nodetest, nsc, localonly) == 1){
@@ -490,10 +492,8 @@ xp_eval_step(xp_ctx     *xc0,
         for (i=0; i<veclen; i++){
             x = vec[i];
             if ((xp = xml_parent(x)) != NULL
-#ifdef XML_PARENT_CANDIDATE
                 /* Also check "candidate" parent for special when use-case */
                 || (xp = xml_parent_candidate(x)) != NULL
-#endif /* XML_PARENT_CANDIDATE */
                 )
                 if (cxvec_append(xp, &xc->xc_nodeset, &xc->xc_size) < 0)
                     goto done;
@@ -1254,6 +1254,7 @@ xp_eval(xp_ctx     *xc,
     xp_ctx    *xr1 = NULL;
     xp_ctx    *xr2 = NULL;
     int        use_xr0 = 0; /* In 2nd child use transitively result of 1st child */
+    int        ix;
 
     // ctx_print(stderr, xc, xpath_tree_int2str(xs->xs_type));
     /* Pre-actions before check first child c0
@@ -1266,13 +1267,9 @@ xp_eval(xp_ctx     *xc,
     case XP_ABSPATH:
         /* Set context node to top node, and nodeset to that node only */
         x = xc->xc_node;
-#ifdef XML_PARENT_CANDIDATE
+        /* If called from text_modify, trees may not be complete and may need temporary parent-candidate check */
         while (xml_parent(x) != NULL || xml_parent_candidate(x) != NULL)
             x = xml_parent(x)?xml_parent(x):xml_parent_candidate(x);
-#else
-        while (xml_parent(x) != NULL)
-            x = xml_parent(x);
-#endif
         xc->xc_node = x;
         xc->xc_nodeset[0] = x;
         xc->xc_size=1;
@@ -1461,8 +1458,8 @@ xp_eval(xp_ctx     *xc,
             memset(xr0, 0, sizeof(*xr0));
             xr0->xc_initial = xc->xc_initial;
             xr0->xc_type = XT_NODESET;
-            x = NULL;
-            while ((x = xml_child_each(xc->xc_node, x, CX_ELMNT)) != NULL) {
+            ix = 0;
+            while ((x = xml_child_iter(xc->xc_node, &ix, CX_ELMNT)) != NULL) {
                 if (cxvec_append(x, &xr0->xc_nodeset, &xr0->xc_size) < 0)
                     goto done;
             }
