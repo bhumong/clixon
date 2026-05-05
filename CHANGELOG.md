@@ -22,28 +22,41 @@ Expected: May 2026
 
 ### Features
 
+* New: A new XML flag: `XML_FLAG_DEL_ANC` has been added to the diff implementation, the new flag marks node in the target tree
+  that a node has been deleted below it. This is similar to XML_FLAG_CHANGE, but for delete only. Previously this info was avialable
+  in the `source` tree only, where the actual delete node still exists.
+* New debug log: `validate`
+* New: [How to hide elements from the data model using NACM?](https://github.com/clicon/clixon/issues/463)
+  * New callback mechanism in the CLI added to verify expansion of all symbols
+  * Enable with `CLICON_NACM_AUTOCLI`
+  * User-guide: https://clixon-docs.readthedocs.io/en/latest/cli.html#nacm-for-autocli
+* New: gRPC/gNMI
+  * Prototype, no TLS
+  * See: https://clixon-docs.readthedocs.io/en/latest/grpc-gnmi.html
 * New: XPath translate()
 * New: [Default values for YANG leaf-list](https://github.com/clicon/clixon/issues/664)
 * Enumerated types now appear in CLI help texts, see eg https://github.com/clicon/clixon/issues/183
 * New xmldb-cache-status: inmem, file and file-inmem to configure each datastore cache behavior
+* Optimization of XML config validation
+  * Cache evaluation of XPath sub-expressions rooted at current() across predicate iterations
+  * Optimized check_unique_list_direct for user-ordered lists and unique constraints from O(N2) to O(NlogN)
+  * Optimized mandatory check by skipping several nodes
+* Added incremental validation when tree has changed, of the following YANG checks:
+  * Must, with parse-time depth dependency analysis of XPaths
+  * Leafrefs, using same XPath depth dependency analysis
+  * Mandatory
+  * Minmax/unique/duplicates
+  * identityrefs
 * Optimization of XML config memory footprint
-  * Reduction by more than 50%, down to between 38% - 48% of original size depending on config
   * Added xmldb status to remove startup in-memory cache
   * Reduced size of `struct xml` struct
-    * Condensed type, sort index, flags and prefix length into a single 64-bit field
-    * Unified body value and child vector into a 64-bit single union
-    * Combined prefix and name into one field, removed name from xml-body
-    * Moved child vector into separate sidecar struct
-    * Removed x_up_candidate and replaced it with ptr map
-    * Moved explicit search-index to ptr map
-    * Removed in-struct iterator
   * Changed child iterator API: use xml_childiter() instead of xml_child_each()
     * Configure with `--enable-child-each-wrapper option` to enable optimization
-
 * show memory: Added detailed statistics for config datastores (CLI and RPC)
 * New `clixon-config@2026-03-01.yang` revision
    * Added `CLICON_VALIDATE_TARGET_STATE`
    * Added `CLICON_XMLDB_CACHE_STATUS`
+   * Added `CLICON_NACM_AUTOCLI`
 * New `clixon-lib@2026-03-01.yang` revision
    * Extended stats rpc with `xml-type` parameter
 
@@ -86,6 +99,7 @@ Developers may need to change their code
 
 ### Corrected Bugs
 
+* Fixed: [List binary search is broken](https://github.com/clicon/clixon/issues/669)
 * Fixed: [cli description should be enumeration's desc not the leaf's. for yang enum type](https://github.com/clicon/clixon/issues/183)
 * Fixed: [CLI: union leafref not supported in completion](https://github.com/clicon/clixon/issues/558)
 * Fixed: [leafref in new type no work in union type](https://github.com/clicon/clixon/issues/388)

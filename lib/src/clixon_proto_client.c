@@ -83,6 +83,7 @@
 #include "clixon_xml_sort.h"
 #include "clixon_netconf_lib.h"
 #include "clixon_xml_io.h"
+#include "clixon_nacm.h"
 #include "clixon_proto_client.h"
 
 #define PERSIST_ID_XML_FMT "<persist-id>%s</persist-id>"
@@ -444,7 +445,7 @@ session_id_check(clixon_handle h,
  */
 int
 clicon_rpc_netconf(clixon_handle h,
-                   char         *xmlstr,
+                   const char   *xmlstr,
                    cxobj       **xret,
                    int          *sp)
 {
@@ -582,11 +583,11 @@ clicon_rpc_netconf_xml(clixon_handle  h,
  */
 int
 clixon_rpc_get_config1(clixon_handle h,
-                       char         *username,
-                       char         *db,
-                       char         *xpath,
+                       const char   *username,
+                       const char   *db,
+                       const char   *xpath,
                        cvec         *nsc,
-                       char         *defaults,
+                       const char   *defaults,
                        yang_bind     yb,
                        cxobj       **xt)
 {
@@ -708,9 +709,9 @@ clixon_rpc_get_config1(clixon_handle h,
  */
 int
 clicon_rpc_edit_config(clixon_handle       h,
-                       char               *db,
+                       const char         *db,
                        enum operation_type op,
-                       char               *xmlstr)
+                       const char         *xmlstr)
 {
     int      retval = -1;
     cbuf    *cb = NULL;
@@ -769,8 +770,8 @@ clicon_rpc_edit_config(clixon_handle       h,
  */
 int
 clicon_rpc_copy_config(clixon_handle h,
-                       char         *db1,
-                       char         *db2)
+                       const char   *db1,
+                       const char   *db2)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -823,7 +824,7 @@ clicon_rpc_copy_config(clixon_handle h,
  */
 int
 clicon_rpc_delete_config(clixon_handle h,
-                         char         *db)
+                         const char   *db)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -872,7 +873,7 @@ clicon_rpc_delete_config(clixon_handle h,
  */
 int
 clicon_rpc_lock(clixon_handle h,
-                char         *db)
+                const char   *db)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -921,7 +922,7 @@ clicon_rpc_lock(clixon_handle h,
  */
 int
 clicon_rpc_unlock(clixon_handle h,
-                  char         *db)
+                  const char   *db)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -1000,11 +1001,11 @@ clicon_rpc_unlock(clixon_handle h,
  */
 int
 clixon_rpc_get1(clixon_handle   h,
-                char           *xpath,
+                const char     *xpath,
                 cvec           *nsc, /* namespace context for filter */
                 netconf_content content,
                 int32_t         depth,
-                char           *defaults,
+                const char     *defaults,
                 yang_bind       yb,
                 cxobj         **xt)
 {
@@ -1145,17 +1146,17 @@ clixon_rpc_get1(clixon_handle   h,
  */
 int
 clicon_rpc_get_pageable_list(clixon_handle   h,
-                             char           *datastore,
-                             char           *xpath,
+                             const char     *datastore,
+                             const char     *xpath,
                              cvec           *nsc, /* namespace context for xpath */
                              netconf_content content,
                              int32_t         depth,
-                             char           *defaults,
+                             const char     *defaults,
                              uint32_t        offset,
                              uint32_t        limit,
-                             char           *direction,
-                             char           *sort,
-                             char           *where,
+                             const char     *direction,
+                             const char     *sort,
+                             const char     *where,
                              cxobj         **xt)
 {
     int        retval = -1;
@@ -1227,8 +1228,12 @@ clicon_rpc_get_pageable_list(clixon_handle   h,
         cprintf(cb, "<direction>%s</direction>", direction);
     if (sort)
         cprintf(cb, "<sort>%s</sort>", sort);
-    if (where)
-        cprintf(cb, "<where>%s</where>", where);
+    if (where) {
+        cprintf(cb, "<where>");
+        if (xml_chardata_cbuf_append(cb, 0, where) < 0)
+            goto done;
+        cprintf(cb, "</where>");
+    }
     cprintf(cb, "</list-pagination>");
     cprintf(cb, "</get>");
     cprintf(cb, "</rpc>");
@@ -1405,7 +1410,7 @@ clicon_rpc_kill_session(clixon_handle h,
  */
 int
 clicon_rpc_validate(clixon_handle h,
-                    char         *db)
+                    const char   *db)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -1465,8 +1470,8 @@ clicon_rpc_commit(clixon_handle h,
                   int           confirmed,
                   int           cancel,
                   uint32_t      timeout,
-                  char         *persist,
-                  char         *persist_id)
+                  const char   *persist,
+                  const char   *persist_id)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -1616,8 +1621,8 @@ clicon_rpc_discard_changes(clixon_handle h)
  */
 int
 clicon_rpc_create_subscription(clixon_handle h,
-                               char         *stream,
-                               char         *filter,
+                               const char   *stream,
+                               const char   *filter,
                                int          *s0)
 {
     int      retval = -1;
@@ -1907,9 +1912,8 @@ clixon_rpc_clixon_cache(clixon_handle h,
                         cbuf         *cbdata)
 {
     int        retval = -1;
-    cxobj     *xrpc = NULL;
     cxobj     *xret = NULL;
-    cxobj     *xerr;
+    cxobj     *xerr = NULL;
     cxobj     *xreply;
     char      *username;
     uint32_t   session_id;
@@ -1954,14 +1958,7 @@ clixon_rpc_clixon_cache(clixon_handle h,
         cprintf(cb, "<argument>%s</argument>", argument);
     cprintf(cb, "</clixon-cache>");
     cprintf(cb, "</rpc>");
-    /* Create XML from cbuf */
-    if ((ret = clixon_xml_parse_string1(h, cbuf_get(cb), YB_NONE, yspec, &xrpc, &xerr)) < 0)
-        goto done;
-    if (ret == 0)
-        goto done; // XXX
-    if (xml_rootchild(xrpc, 0, &xrpc) < 0)
-        goto done;
-    if (clicon_rpc_netconf_xml(h, xrpc, &xret, NULL) < 0)
+    if (clicon_rpc_netconf(h, cbuf_get(cb), &xret, NULL) < 0)
         goto done;
     if ((xerr = xpath_first(xret, NULL, "//rpc-error")) != NULL){
         clixon_err_netconf(h, OE_NETCONF, 0, xerr, "Debug");
@@ -1989,8 +1986,6 @@ clixon_rpc_clixon_cache(clixon_handle h,
  done:
     if (cb)
         cbuf_free(cb);
-    if (xrpc)
-        xml_free(xrpc);
     if (xret)
         xml_free(xret);
     return retval;
@@ -2041,7 +2036,6 @@ clixon_rpc_config_path_info(clixon_handle h,
     yang_stmt *yspec0;
     uint32_t   session_id;
     char      *username;
-    cxobj     *xrpc = NULL;
     cxobj     *xret = NULL;
     cxobj     *xe;
     cxobj     *xerr = NULL;
@@ -2104,14 +2098,7 @@ clixon_rpc_config_path_info(clixon_handle h,
     }
     cprintf(cb, "</config-path-info>");
     cprintf(cb, "</rpc>");
-    /* Create XML from cbuf */
-    if ((ret = clixon_xml_parse_string1(h, cbuf_get(cb), YB_NONE, yspec0, &xrpc, &xerr)) < 0)
-        goto done;
-    if (ret == 0)
-        goto done;
-    if (xml_rootchild(xrpc, 0, &xrpc) < 0)
-        goto done;
-    if (clicon_rpc_netconf_xml(h, xrpc, &xret, NULL) < 0)
+    if (clicon_rpc_netconf(h, cbuf_get(cb), &xret, NULL) < 0)
         goto done;
     if ((xe = xpath_first(xret, NULL, "//rpc-error")) != NULL){
         clixon_err_netconf(h, OE_NETCONF, 0, xe, "Debug");
@@ -2190,8 +2177,6 @@ clixon_rpc_config_path_info(clixon_handle h,
  done:
     if (cb)
         cbuf_free(cb);
-    if (xrpc)
-        xml_free(xrpc);
     if (xret)
         xml_free(xret);
     if (xerr)
@@ -2256,7 +2241,6 @@ clixon_rpc_translate_format(clixon_handle    h,
     uint32_t   session_id;
     char      *username;
     cbuf      *cb = NULL;
-    cxobj     *xrpc = NULL;
     cxobj     *xret = NULL;
     cxobj     *xe;
     cxobj     *xn;
@@ -2312,13 +2296,7 @@ clixon_rpc_translate_format(clixon_handle    h,
     cprintf(cb, "</xml>");
     cprintf(cb, "</translate-format>");
     cprintf(cb, "</rpc>");
-    if ((ret = clixon_xml_parse_string1(h, cbuf_get(cb), YB_NONE, yspec0, &xrpc, &xerr)) < 0)
-        goto done;
-    if (ret == 0)
-        goto done;
-    if (xml_rootchild(xrpc, 0, &xrpc) < 0)
-        goto done;
-    if (clicon_rpc_netconf_xml(h, xrpc, &xret, NULL) < 0)
+    if (clicon_rpc_netconf(h, cbuf_get(cb), &xret, NULL) < 0)
         goto done;
     if ((xe = xpath_first(xret, NULL, "//rpc-error")) != NULL){
         clixon_err_netconf(h, OE_NETCONF, 0, xe, "Debug");
@@ -2358,8 +2336,6 @@ clixon_rpc_translate_format(clixon_handle    h,
  done:
     if (cb)
         cbuf_free(cb);
-    if (xrpc)
-        xml_free(xrpc);
     if (xret)
         xml_free(xret);
     if (xerr)
@@ -2378,7 +2354,7 @@ clixon_rpc_translate_format(clixon_handle    h,
  */
 int
 clicon_rpc_restart_plugin(clixon_handle h,
-                          char         *plugin)
+                          const char   *plugin)
 {
     int      retval = -1;
     cxobj   *xret = NULL;
@@ -2418,6 +2394,101 @@ clicon_rpc_restart_plugin(clixon_handle h,
  done:
     if (cb)
         cbuf_free(cb);
+    if (xret)
+        xml_free(xret);
+    return retval;
+}
+
+/*! Fetch NACM autocli filter from backend for the current session user
+ *
+ * Sends a nacm-autocli-filter-get RPC to the backend and deserializes the
+ * result into a nacm_autocli_filter_t.  Returns NULL filter (nafp=NULL) if
+ * no restrictions apply for this user.
+ * @param[in]  h     Clixon handle
+ * @param[out] nafp  Malloced filter, or NULL if no filtering needed.
+ *                   Caller must free with nacm_autocli_filter_free()
+ * @retval     0     OK
+ * @retval    -1     Error
+ */
+int
+clixon_rpc_nacm_autocli_filter(clixon_handle          h,
+                                nacm_autocli_filter_t **nafp)
+{
+    int                    retval = -1;
+    cbuf                  *cb = NULL;
+    cxobj                 *xrpc = NULL;
+    cxobj                 *xret = NULL;
+    cxobj                 *xerr;
+    cxobj                 *xreply;
+    cxobj                 *xnaf;
+    cxobj                 *xchild;
+    char                  *username;
+    char                  *str;
+    nacm_autocli_filter_t *naf = NULL;
+    cg_var                *cv;
+    int                    ix;
+
+    *nafp = NULL;
+    if ((cb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+    cprintf(cb, "<rpc xmlns=\"%s\"", NETCONF_BASE_NAMESPACE);
+    cprintf(cb, " xmlns:%s=\"%s\"", NETCONF_BASE_PREFIX, NETCONF_BASE_NAMESPACE);
+    if ((username = clicon_username_get(h)) != NULL){
+        cprintf(cb, " %s:username=\"%s\"", CLIXON_LIB_PREFIX, username);
+        cprintf(cb, " xmlns:%s=\"%s\"", CLIXON_LIB_PREFIX, CLIXON_LIB_NS);
+    }
+    cprintf(cb, " %s", NETCONF_MESSAGE_ID_ATTR);
+    cprintf(cb, ">");
+    cprintf(cb, "<nacm-autocli-filter-get xmlns=\"%s\"/>", CLIXON_LIB_NS);
+    cprintf(cb, "</rpc>");
+    if (clicon_rpc_msg(h, cb, &xret) < 0)
+        goto done;
+    if ((xerr = xpath_first(xret, NULL, "//rpc-error")) != NULL){
+        clixon_err_netconf(h, OE_NETCONF, 0, xerr, "nacm-autocli-filter-get");
+        goto done;
+    }
+    if ((xreply = xml_find_type(xret, NULL, "rpc-reply", CX_ELMNT)) == NULL)
+        goto ok;
+    if ((xnaf = xml_find_type(xreply, NULL, "nacm-autocli-filter", CX_ELMNT)) == NULL)
+        goto ok;
+    /* Empty container means no filtering */
+    if (xml_child_nr_type(xnaf, CX_ELMNT) == 0)
+        goto ok;
+    if ((naf = calloc(1, sizeof(*naf))) == NULL){
+        clixon_err(OE_UNIX, errno, "calloc");
+        goto done;
+    }
+    if ((naf->naf_paths = cvec_new(0)) == NULL){
+        clixon_err(OE_UNIX, errno, "cvec_new");
+        goto done;
+    }
+    if ((str = xml_find_body(xnaf, "deny-default")) != NULL)
+        naf->naf_deny_default = atoi(str);
+    ix = 0;
+    while ((xchild = xml_child_iter(xnaf, &ix, CX_ELMNT)) != NULL){
+        if (strcmp(xml_name(xchild), "path") != 0)
+            continue;
+        if ((str = xml_body(xchild)) == NULL)
+            continue;
+        if ((cv = cvec_add(naf->naf_paths, CGV_STRING)) == NULL){
+            clixon_err(OE_UNIX, errno, "cvec_add");
+            goto done;
+        }
+        cv_string_set(cv, str);
+    }
+    *nafp = naf;
+    naf = NULL;
+ ok:
+    retval = 0;
+ done:
+    if (naf)
+        nacm_autocli_filter_free(naf);
+    if (cb)
+        cbuf_free(cb);
+    if (xrpc)
+        xml_free(xrpc);
     if (xret)
         xml_free(xret);
     return retval;

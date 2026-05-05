@@ -299,7 +299,7 @@ leafref_opt_cache_new(yang_stmt *ys,
  * @param[out] search Can do binary search (or not)
  * @param[out] x0p    First object hit, if searchable
  * @retval     0      OK
- * @note only binary search if xvec have the same parent, this could probably be implemented
+ * @see https://github.com/clicon/clixon/issues/669
  */
 static int
 leafref_opt_search_detect(cxobj **xvec,
@@ -311,11 +311,14 @@ leafref_opt_search_detect(cxobj **xvec,
     cxobj     *x0;
     cxobj     *xp;
     cxobj     *x0p;
+    cxobj     *xpp = NULL;  /* grandparent of x0 (parent of list entry), for list case */
     yang_stmt *y;
     yang_stmt *y0;
     yang_stmt *yp;
+    yang_stmt *y0p = NULL;  /* YANG spec of x0p (list), for list case */
     cvec      *cvk;
     int        i;
+    int        is_list = 0; /* 1=list key, 0=leaf-list */
 
     x0 = NULL;
     x0p = NULL;
@@ -324,7 +327,6 @@ leafref_opt_search_detect(cxobj **xvec,
         x = xvec[i];
         if ((xp = xml_parent(x)) == NULL)
             break;
-        // XXX Maybe we could do this in xpath code if we use xpath_vec_ctx instead
         if ((y = xml_spec(x)) == NULL)
             break;
         if (i == 0){
@@ -339,14 +341,29 @@ leafref_opt_search_detect(cxobj **xvec,
                      (cvk = yang_cvec_get(yp)) != NULL &&
                      cvec_len(cvk) == 1){
                 /* Only allow single key lists */
+                is_list = 1;
+                y0p = yp;
+                xpp = xml_parent(xp);
             }
             else
                 break;
         }
-        else if (y0 != y || x0p != xp)
+        else if (y0 != y)
             break;
+        else if (is_list){
+            /* For list keys: different list entries (x0p != xp) are acceptable as long as
+             * they belong to the same list type and share the same parent container.
+             * match_leafref_child_list searches via xml_parent(x0p), so grandparent equality suffices.
+             */
+            if (xml_spec(xp) != y0p || xml_parent(xp) != xpp)
+                break;
+        }
+        else {
+            /* For leaf-list: all items must be direct siblings under the same parent */
+            if (x0p != xp)
+                break;
+        }
     }
-    // Does not work in some cases for LISTs
     if (i == xlen && x0 != NULL && xml_parent(x0) && xml_spec(x0)){
         *search = 1;
         *x0pp = x0;
@@ -891,10 +908,6 @@ xml_yang_validate_rpc(clixon_handle h,
             goto done; /* error or validation fail */
         if (ret == 0)
             goto fail;
-        if ((ret = xml_yang_validate_add(h, xn, xret)) < 0)
-            goto done; /* error or validation fail */
-        if (ret == 0)
-            goto fail;
         if (expanddefault && xml_default_recurse(xn, 0, 0) < 0)
             goto done;
     }
@@ -950,10 +963,6 @@ xml_yang_validate_rpc_reply(clixon_handle h,
             goto fail;
         }
         if ((ret = xml_yang_validate_all(h, xn, 0, xret)) < 0)
-            goto done; /* error or validation fail */
-        if (ret == 0)
-            goto fail;
-        if ((ret = xml_yang_validate_add(h, xn, xret)) < 0)
             goto done; /* error or validation fail */
         if (ret == 0)
             goto fail;
@@ -1364,6 +1373,18 @@ check_mandatory(cxobj     *xt,
         clixon_err(OE_YANG, EINVAL, "yt is not config true");
         goto done;
     }
+    /* Leaf, leaf-list, anyxml and anydata nodes can only have metadata as YANG children
+     * (type/units/default/config/mandatory/must/when) — never Y_CHOICE or data nodes —
+     * so the loop below is always a no-op for them. Skip it entirely. */
+    switch (yang_keyword_get(yt)) {
+    case Y_LEAF:
+    case Y_LEAF_LIST:
+    case Y_ANYXML:
+    case Y_ANYDATA:
+        goto ok;
+    default:
+        break;
+    }
     if (yang_keyword_get(yt) == Y_LIST){
         if ((ret = check_list_key(xt, yt, xret)) < 0)
             goto done;
@@ -1372,8 +1393,13 @@ check_mandatory(cxobj     *xt,
     }
     inext = 0;
     while ((yc = yn_iter(yt, &inext)) != NULL) {
-        /* Choice is more complex because of choice/case structure and possibly hierarchical */
-        if (yang_keyword_get(yc) == Y_CHOICE){
+        /* Only data-node children can be mandatory. Skip metadata children (type, must,
+         * when, description, etc.) immediately to avoid the yang_xml_mandatory overhead
+         * (xml_new + xpath eval + xml_purge) for nodes that always return 0.
+         * Y_CHOICE is handled fully inline; the continue avoids the redundant second
+         * yang_xml_mandatory call it received in the original code. */
+        switch (yang_keyword_get(yc)) {
+        case Y_CHOICE:
             if (yang_xml_mandatory(xt, yc)){
                 ix = 0;
                 while ((x = xml_child_iter(xt, &ix, CX_ELMNT)) != NULL) {
@@ -1396,6 +1422,14 @@ check_mandatory(cxobj     *xt,
                 goto done;
             if (ret == 0)
                 goto fail;
+            continue;
+        case Y_LEAF:
+        case Y_CONTAINER:
+        case Y_ANYDATA:
+        case Y_ANYXML:
+            break; /* these can be mandatory: fall through to yang_xml_mandatory */
+        default:
+            continue; /* metadata/grouping/list/etc — yang_xml_mandatory always 0 */
         }
         if ((ret = yang_xml_mandatory(xt, yc)) < 0) /* Rest of yangs are immediate children */
             goto done;
@@ -1437,6 +1471,7 @@ check_mandatory(cxobj     *xt,
             break;
         } /* switch */
     }
+ ok:
     retval = 1;
  done:
     if (cb)
@@ -1730,19 +1765,537 @@ xml_yang_validate_leaf_union(clixon_handle h,
     goto done;
 }
 
+/*! Incremental-aware choice case-exclusivity check for a single XML node
+ *
+ * Checks that no children from multiple cases of the same choice are present
+ * under the XML parent of @p xt.
+ * When incremental validation is active, skips nodes that are themselves
+ * unchanged (neither ADD nor CHANGE): an existing node was validated at the
+ * prior commit, so any conflict will be detected when the newly added or
+ * modified sibling is checked.  Nodes not under a Y_CHOICE/Y_CASE return OK
+ * immediately via check_choice_child().
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node being validated
+ * @param[in]  yt     Yang spec of xt
+ * @param[in]  incrml Non-zero: apply incremental skip optimisation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+static int
+validate_choice1(clixon_handle h,
+                 cxobj        *xt,
+                 yang_stmt    *yt,
+                 int           incrml,
+                 cxobj       **xret)
+{
+    int    retval = -1;
+    int    ret;
+
+    /* Skip unchanged nodes: they were valid at the prior commit, and any
+     * conflict introduced by a new sibling is caught when that sibling
+     * is validated (it carries ADD/CHANGE). */
+    if (incrml &&
+        !xml_flag(xt, XML_FLAG_ADD) &&
+        !xml_flag(xt, XML_FLAG_CHANGE)){
+        clixon_debug(CLIXON_DBG_VALIDATE, "%s: skip choice: %s (unchanged)",
+                     __func__, xml_name(xt));
+        goto ok;
+    }
+    if ((ret = check_choice_child(xt, yt, xret)) < 0)
+        goto done;
+    if (ret == 0)
+        goto fail;
+  ok:
+    retval = 1;
+  done:
+    return retval;
+  fail:
+    retval = 0;
+    goto done;
+}
+
+/*! Incremental-aware when-expression check for a single XML node
+ *
+ * Evaluates any "when" XPath condition.  Skips evaluation when the cached depth shows the common ancestor of all
+ * referenced nodes is unchanged.
+ * Only skip direct Y_WHEN children are eligible for the skip; augment/uses-attached "when" statements (stored in the external
+ * yang_when map) have no cached depth and always re-evaluate.
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node being validated
+ * @param[in]  yt     Yang spec of xt
+ * @param[in]  incrml Non-zero: apply incremental skip optimisation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+static int
+validate_when1(clixon_handle h,
+               cxobj        *xt,
+               yang_stmt    *yt,
+               int           incrml,
+               cxobj       **xret)
+{
+    int        retval = -1;
+    int        hit    = 0;
+    int        nr     = 0;
+    char      *xpath1 = NULL;
+    cbuf      *cb     = NULL;
+    int        ret;
+#ifdef VALIDATE_INCREMENTAL
+    yang_stmt *ywhen;
+    cg_var    *whencv;
+    int32_t    whendepth;
+    cxobj     *xanc;
+    int        wdepth;
+#endif
+
+#ifdef VALIDATE_INCREMENTAL
+    /* Direct Y_WHEN child: if its cached depth shows the ancestor at that
+     * depth is unchanged, the when result cannot have changed.
+     * Augment/uses-attached when (yang_when_get) has no depth cache and
+     * always falls through to the full check below.
+     */
+    if (incrml &&
+        (ywhen = yang_find(yt, Y_WHEN, NULL)) != NULL &&
+        (whencv = yang_cv_get(ywhen)) != NULL &&
+        (whendepth = cv_int32_get(whencv)) >= 0){
+        xanc = xt;
+        for (wdepth = 0; wdepth < whendepth && xanc != NULL; wdepth++)
+            xanc = xml_parent(xanc);
+        if (xanc != NULL &&
+            !(xml_flag(xanc, XML_FLAG_CHANGE) ||
+              xml_flag(xanc, XML_FLAG_ADD) ||
+              xml_flag(xanc, XML_FLAG_DEL_ANC))){
+            clixon_debug(CLIXON_DBG_VALIDATE, "%s: skip when: %s (ancestor unchanged)",
+                         __func__, yang_argument_get(ywhen));
+            goto ok;
+        }
+    }
+#endif /* VALIDATE_INCREMENTAL */
+    ret = yang_check_when_xpath(xt, xml_parent(xt), yt, &hit, &nr, &xpath1);
+    clixon_debug(CLIXON_DBG_XPATH|CLIXON_DBG_DETAIL, "nr:%d xpath:%s return:%d", nr, xpath1, ret);
+    if (ret < 0)
+        goto done;
+    if (hit && nr == 0){
+        if ((cb = cbuf_new()) == NULL){
+            clixon_err(OE_UNIX, errno, "cbuf_new");
+            goto done;
+        }
+        cprintf(cb, "WHEN condition failed, xpath is %s ", xpath1);
+        if (validate_errmsg(&cb, xt, yt) < 0)
+            goto done;
+        clixon_debug(OE_YANG, "Operation failed: %s", cbuf_get(cb));
+#ifdef CLIXON_RELAX_VALIDATE
+        goto ok;
+#endif
+        if (xret && netconf_operation_failed_xml(xret, "application",
+                                                 cbuf_get(cb)) < 0)
+            goto done;
+        goto fail;
+    }
+  ok:
+    retval = 1;
+  done:
+    if (xpath1)
+        free(xpath1);
+    if (cb)
+        cbuf_free(cb);
+    return retval;
+  fail:
+    retval = 0;
+    goto done;
+}
+
+/*! Incremental-aware mandatory check for a single XML node
+ *
+ * Checks that all mandatory children are present. Skips unchanged subtrees
+ * when incrml is set and neither CHANGE, ADD nor DEL_ANC is set on xt.
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node being validated
+ * @param[in]  yt     Yang spec of xt
+ * @param[in]  incrml Non-zero: apply incremental skip optimisation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+static int
+validate_mandatory1(clixon_handle h,
+                    cxobj        *xt,
+                    yang_stmt    *yt,
+                    int           incrml,
+                    cxobj       **xret)
+{
+    int retval = -1;
+    int ret;
+
+    if (incrml &&
+        !(xml_flag(xt, XML_FLAG_CHANGE) || xml_flag(xt, XML_FLAG_ADD) ||
+          xml_flag(xt, XML_FLAG_DEL_ANC))){
+        clixon_debug(CLIXON_DBG_VALIDATE, "%s: skip mandatory: %s (unchanged)",
+                     __func__, xml_name(xt));
+        goto ok;
+    }
+    clixon_debug(CLIXON_DBG_VALIDATE, "%s: check mandatory: %s", __func__, xml_name(xt));
+    if ((ret = check_mandatory(xt, yt, xret)) < 0)
+        goto done;
+    if (ret == 0)
+        goto fail;
+  ok:
+    retval = 1;
+  done:
+    return retval;
+  fail:
+    retval = 0;
+    goto done;
+}
+
+/*! Incremental-aware type validation for a Y_LEAF or Y_LEAF_LIST node
+ *
+ * Two-phase validation:
+ *
+ * Step 1 (all non-union types): value type and basic constraint check.
+ * Parses the leaf body using the YANG type cv template and calls ys_cv_validate.
+ * For leafref, ys_cv_validate resolves the path to the target type and validates
+ * the value against it (e.g. "'str' is not a number" for a uint32 target).
+ * Skip when the leaf is unchanged (ADD/CHANGE not set).
+ *
+ * Step 2 (leafref, identityref, union): cross-reference / structural checks.
+ *  - leafref:     existence check (validate_leafref).  Skipped via ancestor-depth
+ *                 cache when neither source nor target area changed.
+ *  - identityref: identity-derivation check (validate_identityref).  Skipped when
+ *                 the leaf is unchanged.
+ *  - union:       full union validation (xml_yang_validate_leaf_union), always run.
+ *
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node being validated
+ * @param[in]  yt     Yang spec of xt
+ * @param[in]  incrml Non-zero: apply incremental skip optimisation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+static int
+validate_leaf_type1(clixon_handle h,
+                    cxobj        *xt,
+                    yang_stmt    *yt,
+                    int           incrml,
+                    cxobj       **xret)
+{
+    int            retval = -1;
+    yang_stmt     *yc;
+    char          *type_name;
+    cg_var        *cv     = NULL;
+    cg_var        *cv0;
+    char          *reason = NULL;
+    char          *body;
+    enum cv_type   cvtype;
+    cbuf          *cb     = NULL;
+    int            ret;
+#ifdef VALIDATE_INCREMENTAL
+    yang_stmt *ypath;
+    cg_var    *leafcv;
+    int32_t    leafdepth;
+    cxobj     *xanc;
+    int        mustd;
+#endif
+
+    if (yang_type_get(yt, NULL, &yc, NULL, NULL, NULL, NULL, NULL) < 0)
+        goto done;
+    type_name = yang_argument_get(yc);
+
+    /* Step 1: value type and basic constraint check for non-union types.
+     * ys_cv_validate resolves leafref paths to the target type, so a value
+     * that cannot be parsed as the target type (e.g. "str" for uint32) is
+     * caught here before the existence check in step 2.
+     * Skipped when the leaf is unchanged (neither ADD nor CHANGE).
+     */
+    if (strcmp(type_name, "union") != 0){
+        if (incrml &&
+            !xml_flag(xt, XML_FLAG_ADD) &&
+            !xml_flag(xt, XML_FLAG_CHANGE)){
+            clixon_debug(CLIXON_DBG_VALIDATE, "%s: skip type: %s (unchanged)",
+                         __func__, xml_name(xt));
+            /* Fall through to step 2 — cross-reference checks have own skips. */
+        }
+        else if ((cv0 = yang_cv_get(yt)) != NULL){
+            if ((cv = cv_dup(cv0)) == NULL){
+                clixon_err(OE_UNIX, errno, "cv_dup");
+                goto done;
+            }
+            if ((body = xml_body(xt)) == NULL){
+                cvtype = cv_type_get(cv);
+                if (cv_isint(cvtype) || cvtype == CGV_BOOL || cvtype == CGV_DEC64){
+                    if (xret && netconf_bad_element_xml(xret, "application",
+                                                        yang_argument_get(yt),
+                                                        "Invalid NULL value") < 0)
+                        goto done;
+                    goto fail;
+                }
+                if (cvtype != CGV_EMPTY && cvtype != CGV_VOID){
+                    if (cv_parse1("", cv, &reason) != 1){
+                        if (xret && netconf_bad_element_xml(xret, "application",
+                                                            yang_argument_get(yt),
+                                                            reason) < 0)
+                            goto done;
+                        goto fail;
+                    }
+                }
+            }
+            else {
+                if (cv_parse1(body, cv, &reason) != 1){
+                    if (xret && netconf_bad_element_xml(xret, "application",
+                                                        yang_argument_get(yt),
+                                                        reason) < 0)
+                        goto done;
+                    goto fail;
+                }
+            }
+            /* For leafref with require-instance true (the default), skip
+             * ys_cv_validate: step 2 (validate_leafref) reports the RFC 7950
+             * mandated data-missing/instance-required error.  Only when
+             * require-instance is explicitly false does step 1 need to
+             * type-check the value (e.g. "str" targeting a uint32), since
+             * step 2 skips the existence check in that case.
+             */
+            if (strcmp(type_name, "leafref") != 0 ||
+                yang_find(yc, Y_REQUIRE_INSTANCE, NULL) != NULL){
+                if ((ret = ys_cv_validate(h, cv, yt, NULL, &reason)) < 0)
+                    goto done;
+                if (ret == 0){
+                    if ((cb = cbuf_new()) == NULL){
+                        clixon_err(OE_UNIX, errno, "cbuf_new");
+                        goto done;
+                    }
+                    cprintf(cb, "%s: ", reason);
+                    if (validate_errmsg(&cb, xt, yt) < 0)
+                        goto done;
+                    if (xret && netconf_bad_element_xml(xret, "application",
+                                                        yang_argument_get(yt),
+                                                        cbuf_get(cb)) < 0)
+                        goto done;
+                    goto fail;
+                }
+            }
+        }
+        /* Non-special types (not leafref/identityref) need no cross-reference
+         * check: step 1 covered all constraints. */
+        if (strcmp(type_name, "leafref") != 0 &&
+            strcmp(type_name, "identityref") != 0)
+            goto ok;
+    }
+
+    /* Step 2: type-specific cross-reference / structural checks */
+    if (strcmp(type_name, "leafref") == 0){
+#ifdef VALIDATE_INCREMENTAL
+        /* Incremental skip: if the common ancestor (reached by walking up the
+         * leafref path's ../ depth) has no CHANGE/ADD/DEL_ANC, then neither
+         * the source leaf nor any target under that ancestor changed.
+         * Only applies to relative paths (depth >= 1); absolute paths give -1.
+         */
+        if (incrml &&
+            (ypath = yang_find(yc, Y_PATH, NULL)) != NULL &&
+            (leafcv = yang_cv_get(ypath)) != NULL &&
+            (leafdepth = cv_int32_get(leafcv)) >= 1){
+            xanc = xt;
+            for (mustd = 0; mustd < leafdepth && xanc != NULL; mustd++)
+                xanc = xml_parent(xanc);
+            if (xanc != NULL &&
+                !(xml_flag(xanc, XML_FLAG_CHANGE) ||
+                  xml_flag(xanc, XML_FLAG_ADD) ||
+                  xml_flag(xanc, XML_FLAG_DEL_ANC))){
+                clixon_debug(CLIXON_DBG_VALIDATE,
+                             "%s: skip leafref: %s (ancestor unchanged)",
+                             __func__, yang_argument_get(ypath));
+                goto ok;
+            }
+        }
+        clixon_debug(CLIXON_DBG_VALIDATE, "%s: check leafref: %s", __func__,
+                     (ypath = yang_find(yc, Y_PATH, NULL)) ? yang_argument_get(ypath) : "?");
+#endif /* VALIDATE_INCREMENTAL */
+        if ((ret = validate_leafref(xt, yt, yc, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
+    }
+    else if (strcmp(type_name, "identityref") == 0){
+        /* Identity-derivation check.  Skip when the leaf is unchanged;
+         * ys_cv_validate in step 1 already checked string syntax. */
+        if (incrml &&
+            !xml_flag(xt, XML_FLAG_ADD) &&
+            !xml_flag(xt, XML_FLAG_CHANGE)){
+            clixon_debug(CLIXON_DBG_VALIDATE, "%s: skip identityref: %s (unchanged)",
+                         __func__, xml_name(xt));
+            goto ok;
+        }
+        clixon_debug(CLIXON_DBG_VALIDATE, "%s: check identityref: %s", __func__, xml_name(xt));
+        if ((ret = validate_identityref(xt, yt, yc, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
+    }
+    else if (strcmp(type_name, "union") == 0){
+        /* Union may contain leafref branches whose common-ancestor depth cannot
+         * be determined without walking all type alternatives; always validate. */
+        if ((ret = xml_yang_validate_leaf_union(h, xt, yt, yc, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
+    }
+  ok:
+    retval = 1;
+  done:
+    if (cv)
+        cv_free(cv);
+    if (reason)
+        free(reason);
+    if (cb)
+        cbuf_free(cb);
+    return retval;
+  fail:
+    retval = 0;
+    goto done;
+}
+
+/*! Incremental-aware must-expression loop for a single XML node
+ *
+ * Iterates over all Y_MUST children of @p yt and evaluates each XPath.
+ * A must is skipped when its cached depth shows the relevant ancestor is unchanged.
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node being validated
+ * @param[in]  yt     Yang spec of xt
+ * @param[in]  incrml Non-zero: apply incremental skip optimisation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+static int
+validate_musts1(clixon_handle h,
+                cxobj        *xt,
+                yang_stmt    *yt,
+                int           incrml,
+                cxobj       **xret)
+{
+    int        retval   = -1;
+    yang_stmt *yc;
+    yang_stmt *ye;
+    char      *xpath;
+    cbuf      *cb       = NULL;
+    cvec      *nsc      = NULL;
+    int        nr;
+    int        saw_node = 0;
+    int        inext;
+#ifdef VALIDATE_INCREMENTAL
+    cg_var    *mustcv;
+    int32_t    mustdepth;
+    cxobj     *xanc;
+    int        mustd;
+#endif
+
+    inext = 0;
+    while ((yc = yn_iter(yt, &inext)) != NULL){
+        if (yang_keyword_get(yc) != Y_MUST)
+            continue;
+        clixon_debug(CLIXON_DBG_VALIDATE, "MUST %s %d %s\n",
+                     yang_filename_get(ys_module(yc)),
+                     yang_linenum_get(yc),
+                     yang_argument_get(yc));
+        /* Deviate non-supported, see yang_deviation */
+        if (yang_flag_get(yc, YANG_FLAG_NOT_SUPPORT))
+            continue;
+        xpath = yang_argument_get(yc);
+#ifdef VALIDATE_INCREMENTAL
+        if (incrml &&
+            (mustcv = yang_cv_get(yc)) != NULL){
+            if ((mustdepth = cv_int32_get(mustcv)) >= 0){
+                xanc = xt;
+                for (mustd = 0; mustd < mustdepth && xanc != NULL; mustd++)
+                    xanc = xml_parent(xanc);
+                if (xanc != NULL &&
+                    !(xml_flag(xanc, XML_FLAG_CHANGE) ||
+                      xml_flag(xanc, XML_FLAG_ADD) ||
+                      xml_flag(xanc, XML_FLAG_DEL_ANC))){
+                    clixon_debug(CLIXON_DBG_VALIDATE,
+                                 "%s: skip must: %s (ancestor unchanged)",
+                                 __func__, xpath);
+                    continue;
+                }
+            }
+        }
+#endif /* VALIDATE_INCREMENTAL */
+        if (!saw_node)
+            clixon_debug_xml(CLIXON_DBG_XPATH, xt, "");
+        saw_node = 1;
+        clixon_debug(CLIXON_DBG_VALIDATE, "%s: check must: %s", __func__, xpath);
+        /* the context node is the node in the accessible tree for which the
+         * "must" statement is defined; namespace declarations are from imports */
+        if (xml_nsctx_yang(yc, &nsc) < 0)
+            goto done;
+        clixon_debug(CLIXON_DBG_XPATH, "namespace '%s'", xml_nsctx_get(nsc, NULL));
+        nr = xpath_vec_bool(xt, nsc, "%s", xpath);
+        clixon_debug(CLIXON_DBG_XPATH, "result %s", (nr < 0 ? "error" : (nr != 0 ? "true" : "false")));
+        if (nr < 0)
+            goto done;
+        if (!nr){
+            ye = yang_find(yc, Y_ERROR_MESSAGE, NULL);
+            if ((cb = cbuf_new()) == NULL){
+                clixon_err(OE_UNIX, errno, "cbuf_new");
+                goto done;
+            }
+            cprintf(cb, "Failed MUST xpath '%s'", xpath);
+#if 1
+            if (ye)
+                cprintf(cb, " %s ", yang_argument_get(ye));
+            if (validate_errmsg(&cb, xt, yt) < 0)
+                goto done;
+            if (xret && netconf_operation_failed_xml(xret, "application",
+                                             cbuf_get(cb)) < 0)
+                goto done;
+#else
+            cprintf(cb, "Failed MUST xpath '%s' of '%s' in module %s",
+                    xpath, xml_name(xt), yang_argument_get(ys_module(yt)));
+            if (xret && netconf_operation_failed_xml(xret, "application",
+                                             ye?yang_argument_get(ye):cbuf_get(cb)) < 0)
+                goto done;
+#endif
+            goto fail;
+        }
+        if (nsc){
+            xml_nsctx_free(nsc);
+            nsc = NULL;
+        }
+    }
+    retval = 1;
+  done:
+    if (cb)
+        cbuf_free(cb);
+    if (nsc)
+        xml_nsctx_free(nsc);
+    return retval;
+  fail:
+    retval = 0;
+    goto done;
+}
+
 /*! Validate a single XML node with yang specification for all (not only added) entries
  *
- * @param[in]  h     Clixon handle
- * @param[in]  xt    XML node to be validated
- * @param[in]  state 0: ignore state, 1: also validate state (non-config)
- * @param[out] xret  Error XML tree (if retval=0). Free with xml_free after use
- * @retval     1     Validation OK
- * @retval     0     Validation failed (cbret set)
- * @retval    -1     Error
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML node to be validated
+ * @param[in]  state  Also validate state, otherwise only config data
+ * @param[in]  incrml Incremental validation based on XML flag values.  0 means full validatation
+ * @param[out] xret   Error XML tree (if retval=0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (cbret set)
+ * @retval    -1      Error
  * @code
  *   cxobj *x;
  *   cbuf *xret = NULL;
- *   if ((ret = xml_yang_validate_all(h, x, 0, &xret)) < 0)
+ *   if ((ret = xml_yang_validate_all(h, x, 0, 0, &xret)) < 0)
  *      err;
  *   if (ret == 0)
  *      fail;
@@ -1755,24 +2308,17 @@ static int
 xml_yang_validate_all1(clixon_handle h,
                        cxobj        *xt,
                        int           state,
+                       int           incrml,
                        cxobj       **xret)
 {
     int        retval = -1;
     yang_stmt *yt;  /* yang node associated with xt */
     yang_stmt *yc;  /* yang child */
-    yang_stmt *ye;  /* yang must error-message */
-    char      *xpath;
-    char      *xpath1 = NULL;
-    int        nr;
     cxobj     *x;
     cxobj     *xp;
     char      *ns = NULL;
     cbuf      *cb = NULL;
-    cvec      *nsc = NULL;
-    int        hit = 0;
     validate_level vl = VL_NONE;
-    int        saw_node = 0;
-    int        inext;
     int        ix;
     int        ret;
 
@@ -1780,8 +2326,19 @@ xml_yang_validate_all1(clixon_handle h,
         if ((ret = xml_yang_mount_get(h, xt, &vl, NULL, NULL)) < 0)
             goto done;
         /* Check if validate beyond mountpoints */
-        if (ret == 1 && vl == VL_NONE)
-            goto ok;
+        if (ret == 1){
+            if (vl == VL_NONE)
+                goto ok;
+            /* Race-condition: mount-get gives "potential" validation, but before it actually gets mounted, the validation
+             * is done and fails because of missing yang spec. We check if the yang spec is not yet an actual mount point,
+             * and if so, skip validation (unless skip unknown data already)
+             */
+            if (clicon_option_bool(h, "CLICON_YANG_UNKNOWN_ANYDATA") == 0 &&
+                (yt = xml_spec(xt)) != NULL &&
+                yang_flag_get(yt, YANG_FLAG_MTPOINT) == 0x0) {
+                goto ok;
+            }
+        }
     }
     /* if not given by argument (overide) use default link
        and !Node has a config sub-statement and it is false */
@@ -1809,155 +2366,82 @@ xml_yang_validate_all1(clixon_handle h,
         goto fail;
     }
     if (yang_config(yt) != 0){
-        ret = yang_check_when_xpath(xt, xml_parent(xt), yt, &hit, &nr, &xpath1);
-        clixon_debug(CLIXON_DBG_XPATH|CLIXON_DBG_DETAIL, "nr:%d xpath:%s return:%d", nr, xpath1, ret);
-        if (ret < 0)
-            goto done;
-        if (hit && nr == 0){
-            if ((cb = cbuf_new()) == NULL){
-                clixon_err(OE_UNIX, errno, "cbuf_new");
-                goto done;
-            }
-            cprintf(cb, "WHEN condition failed, xpath is %s ", xpath1);
-            if (validate_errmsg(&cb, xt, yt) < 0)
-                goto done;
-            clixon_debug(OE_YANG, "Operation failed: %s", cbuf_get(cb));
-#ifdef CLIXON_RELAX_VALIDATE
-            goto ok;
-#endif
-            if (xret && netconf_operation_failed_xml(xret, "application",
-                                                     cbuf_get(cb)) < 0)
-                goto done;
-            goto fail;
-        }
-        if ((ret = check_mandatory(xt, yt, xret)) < 0)
+        /* when */
+        if ((ret = validate_when1(h, xt, yt, incrml, xret)) < 0)
             goto done;
         if (ret == 0)
             goto fail;
-        /* Node-specific validation */
+        /* choice case exclusivity */
+        if ((ret = validate_choice1(h, xt, yt, incrml, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
+        /* mandatory */
+        if ((ret = validate_mandatory1(h, xt, yt, incrml, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
+        /* leaf/leaf-list type-specific checks */
         switch (yang_keyword_get(yt)){
         case Y_ANYXML:
         case Y_ANYDATA:
             goto ok;
             break;
         case Y_LEAF:
-            /* fall thru */
         case Y_LEAF_LIST:
-            /* Special case if leaf is leafref, then first check against
-               current xml tree
-            */
-            /* Get base type yc */
-            if (yang_type_get(yt, NULL, &yc, NULL, NULL, NULL, NULL, NULL) < 0)
+            if ((ret = validate_leaf_type1(h, xt, yt, incrml, xret)) < 0)
                 goto done;
-            if (strcmp(yang_argument_get(yc), "leafref") == 0){
-                if ((ret = validate_leafref(xt, yt, yc, xret)) < 0)
-                    goto done;
-                if (ret == 0)
-                    goto fail;
-                }
-            else if (strcmp(yang_argument_get(yc), "identityref") == 0){
-                if ((ret = validate_identityref(xt, yt, yc, xret)) < 0)
-                    goto done;
-                if (ret == 0)
-                    goto fail;
-            }
-            else if (strcmp("union", yang_argument_get(yc)) == 0){
-                if ((ret = xml_yang_validate_leaf_union(h, xt, yt, yc, xret)) < 0)
-                    goto done;
-                if (ret == 0)
-                    goto fail;
-            }
+            if (ret == 0)
+                goto fail;
             break;
         default:
             break;
         }
-        /* must sub-node RFC 7950 Sec 7.5.3. Can be several.
-         * XXX. use yang path instead? */
-        inext = 0;
-        while ((yc = yn_iter(yt, &inext)) != NULL) {
-            if (yang_keyword_get(yc) != Y_MUST)
-                continue;
-            /* Deviate non-supported, see yang_deviation */
-            if (yang_flag_get(yc, YANG_FLAG_NOT_SUPPORT))
-                continue;
-            if (!saw_node)
-                clixon_debug_xml(CLIXON_DBG_XPATH, xt, "");
-            saw_node = 1;
-
-            xpath = yang_argument_get(yc); /* "must" has xpath argument */
-            clixon_debug(CLIXON_DBG_XPATH, "xpath '%s'", xpath);
-            /* the context node is the node in the accessible tree for
-             * which the "must" statement is defined.
-             * The set of namespace declarations is the set of all "import" statements'
-             */
-            if (xml_nsctx_yang(yc, &nsc) < 0)
-                goto done;
-            clixon_debug(CLIXON_DBG_XPATH, "namespace '%s'", xml_nsctx_get(nsc, NULL));
-            nr = xpath_vec_bool(xt, nsc, "%s", xpath);
-            clixon_debug(CLIXON_DBG_XPATH, "result %s", (nr < 0 ? "error" : (nr != 0 ? "true" : "false")));
-            if (nr < 0)
-                goto done;
-            if (!nr){
-                ye = yang_find(yc, Y_ERROR_MESSAGE, NULL);
-                if ((cb = cbuf_new()) == NULL){
-                    clixon_err(OE_UNIX, errno, "cbuf_new");
-                    goto done;
-                }
-                cprintf(cb, "Failed MUST xpath '%s'", xpath);
-#if 1
-                if (ye)
-                    cprintf(cb, " %s ", yang_argument_get(ye));
-                if (validate_errmsg(&cb, xt, yt) < 0)
-                    goto done;
-                if (xret && netconf_operation_failed_xml(xret, "application",
-                                                 cbuf_get(cb)) < 0)
-                    goto done;
-#else
-                cprintf(cb, "Failed MUST xpath '%s' of '%s' in module %s",
-                        xpath, xml_name(xt),  yang_argument_get(ys_module(yt)));
-                if (xret && netconf_operation_failed_xml(xret, "application",
-                                                 ye?yang_argument_get(ye):cbuf_get(cb)) < 0)
-                    goto done;
-#endif
-                goto fail;
-            }
-            if (nsc){
-                xml_nsctx_free(nsc);
-                nsc = NULL;
-            }
-        }
+        /* must expressions */
+        if ((ret = validate_musts1(h, xt, yt, incrml, xret)) < 0)
+            goto done;
+        if (ret == 0)
+            goto fail;
     }
     ix = 0;
     while ((x = xml_child_iter(xt, &ix, CX_ELMNT)) != NULL) {
         if (!state && (yc = xml_spec(x)) != NULL && yang_config(yc) == 0)
             continue; /* skip if non-config */
-        if ((ret = xml_yang_validate_all1(h, x, state, xret)) < 0)
+        if ((ret = xml_yang_validate_all1(h, x, state, incrml, xret)) < 0)
             goto done;
         if (ret == 0)
             goto fail;
     }
-    /* Check unique and min-max after choice test for example*/
+    /* Check unique and min-max after choice test for example */
     if (yang_config(yt) != 0){
-        /* Checks if next level contains any unique list constraints */
-        if ((ret = xml_yang_validate_minmax(xt, 1, xret)) < 0)
-            goto done;
-        if (ret == 0)
-            goto fail;
+        /* Skip if this node is unchanged: if neither CHANGE, ADD nor DEL_ANC
+         * is set, no children were added, removed or changed, so counts and
+         * uniqueness constraints hold from the prior commit.
+         */
+        if (incrml &&
+            !(xml_flag(xt, XML_FLAG_CHANGE) || xml_flag(xt, XML_FLAG_ADD) ||
+              xml_flag(xt, XML_FLAG_DEL_ANC))){
+            clixon_debug(CLIXON_DBG_VALIDATE, "skip minmax: %s (unchanged)", xml_name(xt));
+        }
+        else {
+            clixon_debug(CLIXON_DBG_VALIDATE, "check minmax: %s", xml_name(xt));
+            if ((ret = xml_yang_validate_minmax(xt, 1, xret)) < 0)
+                goto done;
+            if (ret == 0)
+                goto fail;
+        }
     }
- ok:
+  ok:
     retval = 1;
- done:
-    if (xpath1)
-        free(xpath1);
+  done:
     if (cb)
         cbuf_free(cb);
-    if (nsc)
-        xml_nsctx_free(nsc);
     return retval;
- fail:
+  fail:
     retval = 0;
     goto done;
 }
+
 
 /*! Validate a single XML node completely with yang specification for all (not only added) entries
  *
@@ -1979,10 +2463,10 @@ xml_yang_validate_all(clixon_handle h,
 
 #ifdef LEAFREF_OPTIMIZE
     leafref_opt_init(h);
-    retval = xml_yang_validate_all1(h, xt, state, xret);
+    retval = xml_yang_validate_all1(h, xt, state, 0, xret);
     leafref_opt_exit(h);
 #else
-    retval = xml_yang_validate_all1(h, xt, state, xret);
+    retval = xml_yang_validate_all1(h, xt, state, 0, xret);
 #endif
     return retval;
 }
@@ -2019,6 +2503,58 @@ xml_yang_validate_all_state(clixon_handle h,
     if ((ret = xml_yang_validate_minmax(xt, 0, xret)) < 1)
         return ret;
     return 1;
+}
+
+/*! Transaction-aware variant of xml_yang_validate_all_state
+ *
+ * Like xml_yang_validate_all_state but accepts incremental-validation options
+ * derived from a transaction diff.  When opts is non-NULL, the mandatory check
+ * is skipped for nodes that carry neither XML_FLAG_CHANGE nor XML_FLAG_ADD,
+ * i.e. nodes whose subtree is provably unchanged since the last commit.
+ *
+ * Called from generic_validate() in the commit path after compute_diffs() has
+ * set XML change flags on td->td_target.
+ *
+ * @param[in]  h      Clixon handle
+ * @param[in]  xt     XML tree to validate (td->td_target or subtree thereof)
+ * @param[in]  state  Also validate state, otherwise only config data
+ * @param[in]  incrml Incremental-validation based on XML flag value.; 0 means full validatation
+ * @param[out] xret   Error XML tree (if ret == 0). Free with xml_free after use
+ * @retval     1      Validation OK
+ * @retval     0      Validation failed (xret set)
+ * @retval    -1      Error
+ */
+int
+xml_yang_validate_all_state_td(clixon_handle h,
+                               cxobj        *xt,
+                               int           state,
+                               int           incrml,
+                               cxobj       **xret)
+{
+    cxobj     *x;
+    yang_stmt *y;
+    int        ix;
+    int        ret;
+    int        retval = -1;
+
+    ix = 0;
+    while ((x = xml_child_iter(xt, &ix, CX_ELMNT)) != NULL) {
+        if (!state && (y = xml_spec(x)) != NULL && yang_config(y) == 0)
+            continue; /* skip if non-config */
+#ifdef LEAFREF_OPTIMIZE
+        leafref_opt_init(h);
+        ret = xml_yang_validate_all1(h, x, state, incrml, xret);
+        leafref_opt_exit(h);
+#else
+        ret = xml_yang_validate_all1(h, x, state, incrml, xret);
+#endif
+        if (ret < 1)
+            return ret;
+    }
+    if ((ret = xml_yang_validate_minmax(xt, 0, xret)) < 1)
+        return ret;
+    retval = 1;
+    return retval;
 }
 
 /*! Exit validation module

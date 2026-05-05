@@ -74,6 +74,8 @@ module clixon-lib {
             "Added:
                 Extended stats rpc with xml-type paramater
                 Added xml-stats-type to : error-message
+                Added grpc as transport
+                debug flag: validate
              Released in Clixon 7.8";
     }
     revision 2025-12-01 {
@@ -292,6 +294,10 @@ module clixon-lib {
                 description "Parser: XML,YANG, etc";
                 position 17;
             }
+            bit validate {
+                description "Validate config wrt YANG";
+                position 18;
+            }
             bit app {
                 description "External applications";
                 position 20;
@@ -412,6 +418,11 @@ module clixon-lib {
     identity cli {
         description
             "A CLI session";
+        base ncm:transport;
+    }
+    identity grpc {
+        description
+            "A gRPC/gNMI session";
         base ncm:transport;
     }
     extension ignore-compare {
@@ -861,6 +872,31 @@ module clixon-lib {
             anyxml data {
                 description
                     "Contains the output format according to format setting.";
+            }
+        }
+    }
+    rpc nacm-autocli-filter-get {
+        description
+            "Return the NACM autocli filter for the current session user.
+             The CLI client calls this once at session start and uses the filter
+             in a local CLIgen node-filter callback to hide NACM-denied nodes
+             from tab-completion.";
+        output {
+            container nacm-autocli-filter {
+                description "NACM filter; empty if no restrictions apply.";
+                leaf deny-default {
+                    description
+                        "1 if read-default is deny (show only permitted paths),
+                         0 if read-default is permit (hide only denied paths).";
+                    type uint8;
+                }
+                leaf-list path {
+                    description
+                        "Normalized schema path (no namespace prefixes).
+                         If deny-default=0: explicitly denied paths.
+                         If deny-default=1: explicitly permitted paths.";
+                    type string;
+                }
             }
         }
     }

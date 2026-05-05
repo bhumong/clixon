@@ -43,11 +43,23 @@
 #define strndup(s, n) clicon_strndup(s, n)
 #endif
 
+/*! Cache evaluation of XPath sub-expressions rooted at current() across predicate iterations
+ *
+ * In expressions like interface[name=current()/../../name], the sub-expression
+ * current()/../../name is invariant (depends only on xc_initial) but is re-evaluated
+ * once per predicate iteration. Cache these results in the xpath_tree node, keyed on
+ * xc_initial, to eliminate redundant traversals in large list predicates.
+ */
+#define XPATH_CURRENT_OPTIMIZE
+
 /*! Optimize special list key searches in XPath finds
  *
  * Identify xpaths that search for exactly a list key, eg: "y[k='3']" and then call
  * binary search. This only works if "y" has proper yang binding and is sorted by system
  * Dont optimize on "hierarchical" lists such as: a/y[k='3'], where a is another list.
+ * Also: with this enabled, xpath_tree_eq wildcards match any expression type (not just
+ * literal strings/numbers), allowing the binary search to be used when the
+ * key value is current() (evaluated as xml_body of the initial context node).
  */
 #define XPATH_LIST_OPTIMIZE
 
@@ -175,6 +187,8 @@
  * If set, report line-numbers in some error-messages (grouping/mandatory key),
  *   However, almost all parsing still reports linenr on error.
  *   Only exception is schema-nodeid sub-parsing
+ * Note that this linenr is of the module originally parsed, in case of a grouping it is the linenr of the
+ * file originally parsed, and not the linenr of the file where the grouping is used.
  * If not set, reduces memory with 8 bytes per yang-stmt.
  */
 #undef YANG_SPEC_LINENR
@@ -249,7 +263,6 @@
  * If a result of an XPath lookup contain elements that are part of the same
  * LEAFLIST or LIST AND that list is ordered-by-system, then one can
  * use binary search on that list instead of linear.
- * LEAFREF_OPT_CACHE must be enabled
  * Caveat: to find out whether all elements are one list a relatively costly
  * loop is made once per yang, this could possibly change and the loop could
  * be improved.
@@ -316,7 +329,10 @@
  */
 #undef YANGLIB_MODSET_NAME_DEFAULT
 
-/*! Use iterators for xml_child_each and xml_child_iter, remaining code that doe not work properly
+/*! Enable incremental validation, ie only check if subtree has changed
  *
+ * Implemented: mandatory, must and minmax/unique
+ * Must relies on pre-compute (parse-time) XPath depth analysis
+ * Note, only some calls use this since a pre-step is to compute diffs
  */
-#define XML_CHILD_USE_ITER
+#define VALIDATE_INCREMENTAL

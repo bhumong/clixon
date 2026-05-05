@@ -83,19 +83,23 @@ struct yang_stmt {
     char              *ys_argument;  /* String / argument depending on keyword */
     cg_var            *ys_cv;        /* cligen variable. See ys_populate()
                                         Following stmts have cv:s:
+                                        Y_ENUM: value
                                         Y_FEATURE: boolean true or false
                                         Y_CONFIG: boolean true or false
-                                        Y_LEAF: for default value
-                                        Y_LEAF_LIST,
+                                        Y_LEAF:      default value
+                                        Y_LEAF_LIST: default value
                                         Y_MAX_ELEMENTS:
                                         Y_MIN_ELEMENTS: inte
                                         Y_MANDATORY: boolean true or false
+                                        Y_MUST:   dependency depth: depth >= 0 walk up 'depth' ancestors
+                                        Y_PATH:   (leafref type): dependency depth: depth >= 0 walk up 'depth' ancestors
                                         Y_REQUIRE_INSTANCE: true or false
                                         Y_FRACTION_DIGITS for fraction-digits
                                         Y_REVISION (uint32)
                                         Y_REVISION_DATE (uint32)
                                         Y_UNKNOWN (optional argument)
-                                        Y_ENUM: value
+                                        Y_WHEN: dependency depth: depth >= 0 walk up 'depth' ancestors
+
                                      */
     cvec              *ys_cvec;      /* List of stmt-specific variables 
                                         Y_EXTENSION: vector of instantiated UNKNOWNS

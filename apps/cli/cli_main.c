@@ -184,8 +184,7 @@ cli_terminate(clixon_handle h)
         cvec_free(nsctx);
     if ((x = clicon_conf_xml(h)) != NULL)
         xml_free(x);
-    clicon_data_cvec_del(h, "cli-edit-cvv");;
-    clicon_data_cvec_del(h, "cli-edit-filter");;
+    autocli_exit(h);
     xpath_optimize_exit();
     /* Delete all plugins, and RPC callbacks */
     clixon_plugin_module_exit(h);
@@ -381,7 +380,7 @@ usage(clixon_handle h,
             "\t-l (s|e|o|n|f<file>) \tLog on (s)yslog, std(e)rr, std(o)ut, (n)one or (f)ile (stderr is default)\n"
             "\t-C <format>\tDump configuration options on stdout after loading. Format is xml|json|text\n"
             "\t-F <file> \tRead commands from file (default stdin)\n"
-            "\t-1\t\tDo not enter interactive mode\n"
+            "\t-1\t\tOneshot: connect to backend and exit, do not enter interactive mode\n"
             "\t-s\t\tDisable output scrolling\n"
             "\t-a UNIX|IPv4|IPv6\tInternal backend socket family\n"
             "\t-u <path|addr>\tInternal socket domain path or IP addr (see -a)\n"
@@ -784,7 +783,7 @@ main(int    argc,
     {
         int enable;
         /* Create autocli from YANG,
-           If not autocli enabled is true, you can start it later from a cli callback by calling autocli_start(h) */
+           If not autocli enabled is true, you can start it later from a cli callback by calling autocli_start( h) */
         if (autocli_enabled(h, &enable) < 0)
             goto done;
         if (!enable)

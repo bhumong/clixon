@@ -97,34 +97,19 @@ generic_validate(clixon_handle       h,
                  transaction_data_t *td,
                  cxobj             **xret)
 {
-    int        retval = -1;
-    cxobj     *x2;
-    int        i;
-    cbuf      *cb = NULL;
-    int        ret;
-
-    /* All entries */
-    if ((ret = xml_yang_validate_all_state(h, td->td_target, 0, xret)) < 0)
+    int                retval = -1;
+    cbuf              *cb = NULL;
+    int                ret;
+#ifdef VALIDATE_INCREMENTAL
+    /* All entries — use td-aware variant to skip checks on unchanged nodes */
+    if ((ret = xml_yang_validate_all_state_td(h, td->td_target, 0, 1, xret)) < 0)
         goto done;
+#else
+    if ((ret = xml_yang_validate_all_state_td(h, td->td_target, 0, NULL, xret)) < 0)
+        goto done;
+#endif
     if (ret == 0)
         goto fail;
-    /* changed entries */
-    for (i=0; i<td->td_clen; i++){
-        x2 = td->td_tcvec[i]; /* target changed */
-        /* Should this be recursive? */
-        if ((ret = xml_yang_validate_add(h, x2, xret)) < 0)
-            goto done;
-        if (ret == 0)
-            goto fail;
-    }
-    /* added entries */
-    for (i=0; i<td->td_alen; i++){
-        x2 = td->td_avec[i];
-        if ((ret = xml_yang_validate_add(h, x2, xret)) < 0)
-            goto done;
-        if (ret == 0)
-            goto fail;
-    }
     // ok:
     retval = 1;
  done:
@@ -134,6 +119,76 @@ generic_validate(clixon_handle       h,
  fail:
     retval = 0;
     goto done;
+}
+
+/*! Find the node in the target tree that corresponds to a source-tree ancestor
+ *
+ * When a leaf is deleted (exists only in source), its parent in the source tree
+ * may still have a counterpart in the target tree. This function walks up the
+ * source chain from xsrc to (but not including) the source root xsroot,
+ * building the path, then walks down the target tree xttop following the same
+ * path using name + first key value matching.
+ *
+ * Called from compute_diffs to propagate XML_FLAG_CHANGE into target ancestors
+ * of deleted nodes so that mandatory checks are not incorrectly skipped.
+ *
+ * @param[in]  xsrc    Source node whose target-equivalent ancestor we seek
+ * @param[in]  xsroot  Root of the source tree (stop before this)
+ * @param[in]  xttop   Root of the target tree to search in
+ * @retval     xt      Target node equivalent to xsrc's parent; NULL if not found
+ */
+static cxobj *
+find_target_equiv(cxobj *xsrc,
+                  cxobj *xsroot,
+                  cxobj *xttop)
+{
+    cxobj  *path[64]; /* ancestor path from xsrc up to xsroot, excl xsroot */
+    int     depth = 0;
+    cxobj  *xp;
+    cxobj  *xt;
+    int     j;
+
+    /* Collect ancestors of xsrc up to (but not including) xsroot */
+    xp = xml_parent(xsrc);
+    while (xp != NULL && xp != xsroot && depth < 64){
+        path[depth++] = xp;
+        xp = xml_parent(xp);
+    }
+    if (depth == 0)
+        return NULL; /* xsrc is direct child of root */
+
+    /* Walk the path top-down through the target tree */
+    xt = xttop;
+    for (j = depth - 1; j >= 0; j--){
+        cxobj      *xsnode = path[j];
+        const char *name   = xml_name(xsnode);
+        yang_stmt  *ys     = xml_spec(xsnode);
+        cxobj      *xmatch = NULL;
+
+        if (ys != NULL &&
+            yang_keyword_get(ys) == Y_LIST){
+            /* For list entries: match by first key value.
+             * yang_cvec_get(Y_LIST) stores key names as cv_string_get, not cv_name_get */
+            cvec   *keycvv = yang_cvec_get(ys);
+            cg_var *kv     = keycvv ? cvec_i(keycvv, 0) : NULL;
+
+            if (kv != NULL){
+                const char *keyname = cv_string_get(kv);
+                const char *keyval;
+
+                if (keyname != NULL &&
+                    (keyval = xml_find_body(xsnode, keyname)) != NULL)
+                    xmatch = xml_find_body_obj(xt, keyname, keyval);
+            }
+        }
+        /* Fall back to simple name match */
+        if (xmatch == NULL)
+            xmatch = xml_find(xt, name);
+        if (xmatch == NULL)
+            return NULL; /* not in target */
+        xt = xmatch;
+    }
+    return xt;
 }
 
 /*! Given a transaction src/target, compute diffs and set flags
@@ -154,6 +209,8 @@ compute_diffs(clixon_handle       h,
     /* Clear flags xpath for get */
     xml_apply0(td->td_src, CX_ELMNT, (xml_applyfn_t*)xml_flag_reset,
                (void*)(XML_FLAG_MARK|XML_FLAG_CHANGE));
+    xml_apply0(td->td_target, CX_ELMNT, (xml_applyfn_t*)xml_flag_reset,
+               (void*)(XML_FLAG_MARK|XML_FLAG_CHANGE|XML_FLAG_DEL_ANC));
     /* 3. Compute differences */
     if (xml_diff(td->td_src,
                  td->td_target,
@@ -169,10 +226,23 @@ compute_diffs(clixon_handle       h,
         transaction_dbg(h, CLIXON_DBG_DETAIL, td, __func__);
     /* Mark as changed in tree */
     for (i=0; i<td->td_dlen; i++){ /* Also down */
+        cxobj *xtarget_equiv;
+
         xn = td->td_dvec[i];
         xml_flag_set(xn, XML_FLAG_DEL);
         xml_apply(xn, CX_ELMNT, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_DEL);
         xml_apply_ancestor(xn, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_CHANGE);
+        /* Propagate XML_FLAG_CHANGE into the TARGET tree so that the mandatory
+         * check in xml_yang_validate_all1 correctly examines ancestors of the
+         * deleted node. Without this, the target parent has no FLAG_CHANGE and
+         * the mandatory check would be incorrectly skipped.
+         * XML_FLAG_DEL_ANC is used (rather than XML_FLAG_CHANGE) so that this
+         * propagation does not affect any other logic that uses XML_FLAG_CHANGE. */
+        xtarget_equiv = find_target_equiv(xn, td->td_src, td->td_target);
+        if (xtarget_equiv != NULL){
+            xml_flag_set(xtarget_equiv, XML_FLAG_DEL_ANC);
+            xml_apply_ancestor(xtarget_equiv, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_DEL_ANC);
+        }
     }
     for (i=0; i<td->td_alen; i++){ /* Also down */
         xn = td->td_avec[i];

@@ -51,6 +51,7 @@ int xml_yang_validate_all(clixon_handle h, cxobj *xt, int state, cxobj **xret);
 int xml_yang_validate_all_state(clixon_handle h, cxobj *xt, int state, cxobj **xret);
 int xml_yang_validate_exit(clixon_handle h);
 int rpc_reply_check(clixon_handle h, const char *rpcname, cbuf *cbret);
+int xml_yang_validate_all_state_td(clixon_handle h, cxobj *xt, int state, int incrml, cxobj **xret);
 
 /*-- Backward compatible 7.7 --*/
 static inline int
