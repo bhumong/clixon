@@ -412,6 +412,8 @@ xp_eval_step(xp_ctx     *xc0,
                 if (cxvec_append(xv, &vec, &veclen) < 0)
                     goto done;
             }
+            ctx_nodeset_replace(xc, vec, veclen);
+            vec = NULL;
             break;
         }
         if (xc->xc_descendant){
@@ -536,6 +538,8 @@ xp_eval_step(xp_ctx     *xc0,
     }
     retval = 0;
  done:
+    if (vec)
+        free(vec);
     if (xc)
         ctx_free(xc);
     return retval;

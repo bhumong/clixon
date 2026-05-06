@@ -535,6 +535,10 @@ xpath_tree_free(xpath_tree *xs)
         xpath_tree_free(xs->xs_c0);
     if (xs->xs_c1)
         xpath_tree_free(xs->xs_c1);
+#ifdef XPATH_CURRENT_OPTIMIZE
+    if (xs->xs_cached_result)
+        ctx_free((xp_ctx *)xs->xs_cached_result);
+#endif
     free(xs);
     return 0;
 }

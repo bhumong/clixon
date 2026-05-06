@@ -137,11 +137,11 @@ backend_terminate(clixon_handle h)
     clixon_event_exit();
     clixon_debug(CLIXON_DBG_BACKEND, "done");
 
-    clixon_err_exit();
     clixon_log_exit();
     stream_delete_all(h, 1);
     xmldb_delete_pattern(h, "^candidate");
     xmldb_disconnect(h);
+    clixon_err_exit();
     clixon_debug_exit();
     backend_handle_exit(h); /* Cannot use h after this. */
     return 0;

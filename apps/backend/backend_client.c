@@ -273,8 +273,8 @@ backend_client_rm(clixon_handle h,
     }
 
     clixon_debug(CLIXON_DBG_BACKEND, "");
-    /* for all streams: XXX better to do it top-level? */
-    stream_ss_delete_all(h, ce_event_cb, (void*)ce);
+    /* Close socket before stream cleanup to prevent ce_event_cb(op=1) from
+     * recursively calling backend_client_rm on the same ce */
     c0 = backend_client_list(h);
     ce_prev = &c0; /* this points to stack and is not real backpointer */
     for (c = *ce_prev; c; c = c->ce_next){
@@ -288,6 +288,8 @@ backend_client_rm(clixon_handle h,
         }
         ce_prev = &c->ce_next;
     }
+    /* With ce_s == 0, ce_event_cb(op=1) will not recurse into backend_client_rm */
+    stream_ss_delete_all(h, ce_event_cb, (void*)ce);
     return backend_client_delete(h, ce); /* actually purge it */
 }
 
@@ -1912,7 +1914,6 @@ from_client(int   s,
         goto done;
     if (eof){
         release_all_dbs(h, ce, ce->ce_id);
-        stream_ss_delete_all(h, ce_event_cb, (void*)ce);
         backend_client_rm(h, ce);
         netconf_monitoring_counter_inc(h, "dropped-sessions");
     }
