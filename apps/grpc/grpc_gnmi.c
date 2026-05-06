@@ -732,8 +732,9 @@ gnmi_extract_value_string(Gnmi__TypedValue *tv)
  *
  * Generates the element tree corresponding to the path, placing list key
  * subelements inline.  If value is non-NULL it is placed inside the innermost
- * element (leaf case).  If op is not OP_MERGE, nc:operation="<op>" is added as
- * an attribute on the outermost element so delete/replace apply per-node.
+ * element (leaf case).  nc:operation="<op>" is added as an attribute on the
+ * innermost element for all operations including merge, so all edits can be
+ * batched into a single edit-config with default-operation=none.
  * The result is appended to cb without the outer <config> wrapper.
  *
  * @param[in]  h      Clixon handle (namespace lookup)
@@ -764,8 +765,7 @@ gnmi_path_to_xml(clixon_handle       h,
 
     if (path == NULL || path->n_elem == 0)
         return 0;
-    if (op != OP_MERGE)
-        opstr = xml_operation2str(op);
+    opstr = xml_operation2str(op);
 
     /* Seed yparent from the top-level element for YANG traversal fallback */
     /* Open elements, emitting xmlns when namespace changes.
@@ -786,13 +786,17 @@ gnmi_path_to_xml(clixon_handle       h,
         if (ns == NULL)
             ns = ens;
 
+        /* nc:operation goes on the innermost (last) element only, so that
+         * intermediate containers are not themselves deleted/replaced. */
+        int is_last = (j == path->n_elem - 1);
+
         if (j == 0){
-            if (ens != NULL && opstr != NULL)
+            if (ens != NULL && opstr != NULL && is_last)
                 cprintf(cb, "<%s xmlns=\"%s\" xmlns:nc=\"%s\" nc:operation=\"%s\">",
                         local, ens, NETCONF_BASE_NAMESPACE, opstr);
             else if (ens != NULL)
                 cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
-            else if (opstr != NULL)
+            else if (opstr != NULL && is_last)
                 cprintf(cb, "<%s xmlns:nc=\"%s\" nc:operation=\"%s\">",
                         local, NETCONF_BASE_NAMESPACE, opstr);
             else
@@ -801,10 +805,18 @@ gnmi_path_to_xml(clixon_handle       h,
         } else {
             /* Emit xmlns only when namespace changes from parent */
             if (ens != NULL && (prev_ns == NULL || strcmp(ens, prev_ns) != 0)){
-                cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
+                if (opstr != NULL && is_last)
+                    cprintf(cb, "<%s xmlns=\"%s\" xmlns:nc=\"%s\" nc:operation=\"%s\">",
+                            local, ens, NETCONF_BASE_NAMESPACE, opstr);
+                else
+                    cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
                 prev_ns = ens;
             } else {
-                cprintf(cb, "<%s>", local);
+                if (opstr != NULL && is_last)
+                    cprintf(cb, "<%s xmlns:nc=\"%s\" nc:operation=\"%s\">",
+                            local, NETCONF_BASE_NAMESPACE, opstr);
+                else
+                    cprintf(cb, "<%s>", local);
             }
         }
         for (nk = 0; nk < elem->n_key; nk++){
@@ -825,8 +837,9 @@ gnmi_path_to_xml(clixon_handle       h,
 
 /*! Handle gNMI Set RPC
  *
- * Processes delete, replace, and update operations from a SetRequest in order,
- * applies all edits to the candidate datastore, then commits.
+ * Processes delete, replace, and update operations from a SetRequest in order.
+ * All edits are batched into a single edit-config RPC with cl:autocommit="true"
+ * so that validation and commit happen atomically in one round trip.
  * Supported value encodings: JSON_IETF, JSON, STRING.
  *
  * @param[in]  h            Clixon handle
@@ -858,9 +871,12 @@ gnmi_set(clixon_handle  h,
     size_t                 ri;
     size_t                 i;
     cbuf                  *xmlcb = NULL;
+    cbuf                  *rpccb = NULL;
+    cxobj                 *xret = NULL;
+    cxobj                 *xerr;
     uint8_t               *buf = NULL;
     size_t                 sz;
-    int                    any = 0;
+    char                  *username;
 
     *grpc_status = GRPC_FAILED_PRECONDITION;
 
@@ -880,24 +896,22 @@ gnmi_set(clixon_handle  h,
     }
     ri = 0;
 
+    /* Build one combined <config> body with all edits.
+     * Each node carries its own nc:operation so we can use default-operation=none.
+     * The single edit-config is sent with cl:autocommit="true" so that validation
+     * and commit happen atomically, and any error (including mandatory-leaf missing)
+     * is returned to the gNMI client. */
+    if ((xmlcb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+    cprintf(xmlcb, "<config>");
+
     /* 1. Process deletes (OP_REMOVE — no error if path absent) */
     for (i = 0; i < req->n_delete_; i++){
         dpath = req->delete_[i];
-
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            goto done;
-        }
-        cprintf(xmlcb, "<config>");
         if (gnmi_path_to_xml(h, dpath, NULL, OP_REMOVE, xmlcb) < 0)
             goto done;
-        cprintf(xmlcb, "</config>");
-        if (clicon_rpc_edit_config(h, "candidate", OP_NONE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
-        any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
             goto done;
@@ -911,28 +925,14 @@ gnmi_set(clixon_handle  h,
     /* 2. Process replaces (OP_REPLACE) */
     for (i = 0; i < req->n_replace; i++){
         upd = req->replace[i];
-
         if (upd->val == NULL)
             continue;
         if ((val = gnmi_extract_value_string(upd->val)) == NULL)
             continue;
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            free(val);
-            goto done;
-        }
-        cprintf(xmlcb, "<config>");
         if (gnmi_path_to_xml(h, upd->path, val, OP_REPLACE, xmlcb) < 0){
             free(val); goto done;
         }
-        cprintf(xmlcb, "</config>");
         free(val);
-        if (clicon_rpc_edit_config(h, "candidate", OP_NONE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
-        any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
             goto done;
@@ -946,28 +946,14 @@ gnmi_set(clixon_handle  h,
     /* 3. Process updates (OP_MERGE) */
     for (i = 0; i < req->n_update; i++){
         upd = req->update[i];
-
         if (upd->val == NULL)
             continue;
         if ((val = gnmi_extract_value_string(upd->val)) == NULL)
             continue;
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            free(val);
-            goto done;
-        }
-        cprintf(xmlcb, "<config>");
         if (gnmi_path_to_xml(h, upd->path, val, OP_MERGE, xmlcb) < 0){
             free(val); goto done;
         }
-        cprintf(xmlcb, "</config>");
         free(val);
-        if (clicon_rpc_edit_config(h, "candidate", OP_MERGE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
-        any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
             goto done;
@@ -978,10 +964,33 @@ gnmi_set(clixon_handle  h,
         results[ri++] = ur;
     }
 
-    /* Commit all changes at once */
-    if (any){
-        if (clicon_rpc_commit(h, 0, 0, 0, NULL, NULL) < 0)
+    cprintf(xmlcb, "</config>");
+
+    /* Send one combined edit-config with autocommit=true when there are operations */
+    if (ri > 0){
+        if ((rpccb = cbuf_new()) == NULL){
+            clixon_err(OE_UNIX, errno, "cbuf_new");
             goto done;
+        }
+        cprintf(rpccb, "<rpc xmlns=\"%s\" %s", NETCONF_BASE_NAMESPACE, NETCONF_MESSAGE_ID_ATTR);
+        if ((username = clicon_username_get(h)) != NULL)
+            cprintf(rpccb, " %s:username=\"%s\" xmlns:%s=\"%s\"",
+                    CLIXON_LIB_PREFIX, username, CLIXON_LIB_PREFIX, CLIXON_LIB_NS);
+        else
+            cprintf(rpccb, " xmlns:%s=\"%s\"", CLIXON_LIB_PREFIX, CLIXON_LIB_NS);
+        cprintf(rpccb, ">");
+        cprintf(rpccb, "<edit-config %s:autocommit=\"true\">", CLIXON_LIB_PREFIX);
+        cprintf(rpccb, "<target><candidate/></target>");
+        cprintf(rpccb, "<default-operation>none</default-operation>");
+        cprintf(rpccb, "%s", cbuf_get(xmlcb));
+        cprintf(rpccb, "</edit-config></rpc>");
+        if (clicon_rpc_netconf(h, cbuf_get(rpccb), &xret, NULL) < 0)
+            goto done;
+        if ((xerr = xpath_first(xret, NULL, "//rpc-error")) != NULL){
+            clixon_err_netconf(h, OE_NETCONF, 0, xerr, "gNMI Set commit failed");
+            *grpc_status = GRPC_FAILED_PRECONDITION;
+            goto done;
+        }
     }
 
     sresp.timestamp  = (int64_t)time(NULL) * (int64_t)1000000000;
@@ -1009,6 +1018,10 @@ gnmi_set(clixon_handle  h,
         gnmi__set_request__free_unpacked(req, NULL);
     if (xmlcb)
         cbuf_free(xmlcb);
+    if (rpccb)
+        cbuf_free(rpccb);
+    if (xret)
+        xml_free(xret);
     if (buf)
         free(buf);
     return retval;
