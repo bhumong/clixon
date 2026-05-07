@@ -194,6 +194,8 @@ clicon_option_dump(clixon_handle h,
     size_t         vlen;
     cxobj         *x = NULL;
     cxobj         *xconf;
+    cxobj         *xsub;
+    char          *b;
     int            ix;
 
     if (clicon_hash_keys(hash, &keys, &klen) < 0)
@@ -239,7 +241,21 @@ clicon_option_dump(clixon_handle h,
             continue;
         clixon_debug(dbglevel, "%s =\t \"%s\"", xml_name(x), xml_body(x));
     }
-   retval = 0;
+    if ((xsub = xml_find_type(xconf, NULL, "autocli", CX_ELMNT)) != NULL){
+        ix = 0;
+        while ((x = xml_child_iter(xsub, &ix, CX_ELMNT)) != NULL) {
+            if ((b = xml_body(x)) != NULL)
+                clixon_debug(dbglevel, "%s/%s =\t \"%s\"", xml_name(xsub), xml_name(x), b);
+        }
+    }
+    if ((xsub = xml_find_type(xconf, NULL, "restconf", CX_ELMNT)) != NULL){
+        ix = 0;
+        while ((x = xml_child_iter(xsub, &ix, CX_ELMNT)) != NULL) {
+            if ((b = xml_body(x)) != NULL)
+                clixon_debug(dbglevel, "%s/%s =\t \"%s\"", xml_name(xsub), xml_name(x), b);
+        }
+    }
+    retval = 0;
  done:
     if (keys)
         free(keys);
@@ -315,7 +331,10 @@ parse_configfile_one(clixon_handle h,
         clixon_err(OE_UNIX, errno, "open configure file: %s", filename);
         return -1;
     }
-    clixon_debug(CLIXON_DBG_INIT, "Reading config file %s", filename);
+    if (yspec)
+        clixon_debug(CLIXON_DBG_INIT, "Reading config file %s", filename);
+    else
+        clixon_debug(CLIXON_DBG_INIT | CLIXON_DBG_DETAIL, "Reading config file %s (bootstrap)", filename);
     if ((ret = clixon_xml_parse_file(fp, yspec?YB_MODULE:YB_NONE, yspec, &xt, &xerr)) < 0)
         goto done;
     if (ret == 0){
@@ -460,7 +479,7 @@ merge_control_xml(clixon_handle h,
  * @param[in]  h            Clixon handle
  * @param[in]  filename     Main configuration file
  * @param[in]  extraconfig0 Override (if set use that, otherwise get from main file)
- * @param[in]  yspec        Yang spec
+ * @param[in]  yspec        Yang spec, if NULL bootstrapping to get YANGDIRs, otherwise full load and validate config file
  * @param[out] xconfig      Pointer to xml config tree. Should be freed by caller
  * @retval     0            OK
  * @retval    -1            Error
@@ -506,7 +525,7 @@ parse_configfile(clixon_handle  h,
         clixon_err(OE_UNIX, 0, "%s is not a regular file", filename);
         goto done;
     }
-    clixon_debug(CLIXON_DBG_INIT, "Reading config file %s", filename);
+    clixon_debug(CLIXON_DBG_INIT | CLIXON_DBG_DETAIL, "Reading config file %s", filename);
     /* Parse main config file */
     if (parse_configfile_one(h, filename, yspec, &xt) < 0)
         goto done;
@@ -532,6 +551,7 @@ parse_configfile(clixon_handle  h,
             closedir(dirp);
             if((ndp = clicon_file_dirent(extraconfdir, &dp, "\\.xml$", S_IFREG)) < 0)  /* Read dir */
                 goto done;
+            clixon_debug(CLIXON_DBG_INIT | CLIXON_DBG_DETAIL, "Reading config dir %s with %d files", extraconfdir, ndp);
         }
         /* Loop through files */
         for (i = 0; i < ndp; i++){
