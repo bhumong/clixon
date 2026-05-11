@@ -1310,7 +1310,7 @@ load_failsafe(clixon_handle h,
         goto done;
     }
     /* Copy original running to tmp as backup (restore if error) */
-    if (xmldb_copy(h, "running", "tmp") < 0)
+    if (xmldb_copy_file(h, "running", "tmp") < 0)
         goto done;
     if (xmldb_db_reset(h, "running") < 0)
         goto done;

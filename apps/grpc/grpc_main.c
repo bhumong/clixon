@@ -82,8 +82,8 @@ grpc_terminate(clixon_handle h)
     xpath_optimize_exit();
     clixon_event_exit();
     clixon_err_exit();
-    clixon_log_exit();
     clixon_debug_exit();
+    clixon_log_exit();
     clixon_handle_exit(h);
     return 0;
 }
