@@ -93,13 +93,20 @@ module example {
          type string;
       }
    }
-   list interface {
-      key name;
-      leaf name {
-         type string;
-      }
-      leaf mtu {
-         type uint32;
+   container network {
+      description "Top-level container wrapping interfaces (tests container/container/list path)";
+      container interfaces {
+         description "Container wrapping the interface list";
+         list interface {
+            key name;
+            leaf name {
+               type string;
+            }
+            leaf mtu {
+               type uint32;
+               mandatory true;
+            }
+         }
       }
    }
    leaf-list tags {
@@ -126,7 +133,7 @@ module example-aug {
    revision 2024-01-01 {
       description "Augmentation module for gRPC test";
    }
-   augment "/ex:interface" {
+   augment "/ex:network/ex:interfaces/ex:interface" {
       leaf ip-address {
          type string;
          description "IP address (augmented leaf in different namespace)";
@@ -136,7 +143,7 @@ module example-aug {
 EOF
 
 # grpcurl base command: plaintext, import proto + google well-known types
-GRPCURL_OPTS="-plaintext -import-path ${GRPC_PROTO_DIR} -import-path /usr/include -proto gnmi.proto"
+GRPCURL_OPTS="-plaintext -import-path ${GRPC_PROTO_DIR} -proto gnmi.proto"
 
 new "test params: -f $cfg"
 
@@ -290,42 +297,63 @@ expectpart "$(grpcurl $GRPCURL_OPTS \
     0 "my-device"
 
 # -------------------------------------------------------------------
-# List tests
+# List tests: mandatory validation + CRUD
+# First try adding a list entry without the mandatory mtu leaf — this
+# should fail and leave the datastore unchanged.
+# Then add with mtu — should succeed.
 # -------------------------------------------------------------------
+
+new "gNMI Set list entry eth0 without mtu (expect mandatory validation error)"
+expectpart "$(grpcurl $GRPCURL_OPTS \
+    -d '{"update":[{"path":{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}},{"name":"name"}]},"val":{"string_val":"eth0"}}]}' \
+    localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
+    73 "FailedPrecondition"
+
+new "gNMI Get eth0 after failed Set (expect not present)"
+expectpart "$(grpcurl $GRPCURL_OPTS \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}}]}],"type":"ALL","encoding":"ASCII"}' \
+    localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
+    0 --not-- "example:network"
 
 new "gNMI Set list entry eth0 mtu=1500"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"update":[{"path":{"elem":[{"name":"interface","key":{"name":"eth0"}},{"name":"mtu"}]},"val":{"uint_val":1500}}]}' \
+    -d '{"update":[{"path":{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}},{"name":"mtu"}]},"val":{"uint_val":1500}}]}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
     0 "response"
 
 new "gNMI Get list entry eth0 mtu (expect 1500)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"path":[{"elem":[{"name":"interface","key":{"name":"eth0"}},{"name":"mtu"}]}],"type":"ALL","encoding":"ASCII"}' \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}},{"name":"mtu"}]}],"type":"ALL","encoding":"ASCII"}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
-    0 "1500"
+    0 "1500" --not-- "eth1"
+
+new "gNMI Get same list entry eth0 mtu using qualified module prefix"
+expectpart "$(grpcurl $GRPCURL_OPTS \
+    -d '{"path":[{"elem":[{"name":"example:network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}},{"name":"mtu"}]}],"type":"ALL","encoding":"ASCII"}' \
+    localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
+    0 "1500" --not-- "eth1"
 
 new "gNMI Set list entry eth1 mtu=9000"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"update":[{"path":{"elem":[{"name":"interface","key":{"name":"eth1"}},{"name":"mtu"}]},"val":{"uint_val":9000}}]}' \
+    -d '{"update":[{"path":{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth1"}},{"name":"mtu"}]},"val":{"uint_val":9000}}]}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
     0 "response"
 
 new "gNMI Get all interfaces (expect eth0 and eth1)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"path":[{"elem":[{"name":"interface"}]}],"type":"ALL","encoding":"ASCII"}' \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface"}]}],"type":"ALL","encoding":"ASCII"}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
     0 "eth0" "eth1"
 
 new "gNMI Set delete list entry eth0"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"delete":[{"elem":[{"name":"interface","key":{"name":"eth0"}}]}]}' \
+    -d '{"delete":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth0"}}]}]}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
     0 "response"
 
 new "gNMI Get all interfaces (expect only eth1 after delete)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"path":[{"elem":[{"name":"interface"}]}],"type":"ALL","encoding":"ASCII"}' \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface"}]}],"type":"ALL","encoding":"ASCII"}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
     0 "eth1" --not-- "eth0"
 
@@ -357,25 +385,25 @@ expectpart "$(grpcurl $GRPCURL_OPTS \
 
 new "gNMI Set augmented leaf (cross-namespace path, module-qualified)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"update":[{"path":{"elem":[{"name":"interface","key":{"name":"eth1"}},{"name":"example-aug:ip-address"}]},"val":{"string_val":"192.0.2.1"}}]}' \
+    -d '{"update":[{"path":{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth1"}},{"name":"example-aug:ip-address"}]},"val":{"string_val":"192.0.2.1"}}]}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
     0 "response"
 
 new "gNMI Get augmented leaf (expect 192.0.2.1)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"path":[{"elem":[{"name":"interface","key":{"name":"eth1"}},{"name":"example-aug:ip-address"}]}],"type":"ALL","encoding":"ASCII"}' \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth1"}},{"name":"example-aug:ip-address"}]}],"type":"ALL","encoding":"ASCII"}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
     0 "192.0.2.1"
 
 new "gNMI Set augmented leaf (unqualified fallback, no module prefix)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"update":[{"path":{"elem":[{"name":"interface","key":{"name":"eth1"}},{"name":"ip-address"}]},"val":{"string_val":"192.0.2.2"}}]}' \
+    -d '{"update":[{"path":{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth1"}},{"name":"ip-address"}]},"val":{"string_val":"192.0.2.2"}}]}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Set 2>&1)" \
     0 "response"
 
 new "gNMI Get augmented leaf via unqualified path (expect 192.0.2.2)"
 expectpart "$(grpcurl $GRPCURL_OPTS \
-    -d '{"path":[{"elem":[{"name":"interface","key":{"name":"eth1"}},{"name":"ip-address"}]}],"type":"ALL","encoding":"ASCII"}' \
+    -d '{"path":[{"elem":[{"name":"network"},{"name":"interfaces"},{"name":"interface","key":{"name":"eth1"}},{"name":"ip-address"}]}],"type":"ALL","encoding":"ASCII"}' \
     localhost:${GRPC_PORT} gnmi.gNMI/Get 2>&1)" \
     0 "192.0.2.2"
 

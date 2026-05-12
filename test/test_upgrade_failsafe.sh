@@ -32,6 +32,8 @@ fyangA0=$dir/A@0814-01-28.yang
 fyangA1=$dir/A@2019-01-01.yang
 fyangB=$dir/B@2019-01-01.yang
 
+let w=1
+
 # Yang module A revision "0814-01-28"
 # Note that this Yang model will exist in the DIR but will not be loaded
 # by the system. Just here for reference
@@ -277,7 +279,7 @@ runtest(){
     if [ $BE -ne 0 ]; then
         # kill old backend (if any)
         new "kill old backend"
-        sudo clixon_backend -zf $cfg
+        stop_backend -f $cfg
         if [ $? -ne 0 ]; then
             err
         fi
@@ -287,8 +289,9 @@ runtest(){
 #       new "Restart backend as eg follows: -Ff $cfg -s $mode -o \"CLICON_XMLDB_MODSTATE=$modstate\" ($BETIMEOUT s)"
     fi
 
-    new "wait backend"
+    new "Wait backend $w"
     wait_backend
+    let w++
 
     new "Check running db content"
     expecteof_netconf "$clixon_netconf -qf $cfg" 0 "$DEFAULTHELLO" "<rpc $DEFAULTNS><get-config><source><running/></source></get-config></rpc>" "" "<rpc-reply $DEFAULTNS>$exprun</rpc-reply>"
@@ -379,6 +382,8 @@ new "8. Load non-compat startup. Syntax fail, enter failsafe, startup invalid"
 (cd $dir; cp compat-err.xml startup_db)
 runtest true startup '<data><a1 xmlns="urn:example:a">always work</a1></data>' '<rpc-error><error-type>application</error-type><error-tag>operation-failed</error-tag><error-severity>error</error-severity><error-message>Get startup datastore: xml_parse: line 17: syntax error: at or before: &lt;</error-message></rpc-error>'
 fi # valgrindtest
+
+unset w
 
 rm -rf $dir
 

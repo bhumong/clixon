@@ -119,10 +119,7 @@ if [ $BE -ne 0 ]; then
 fi
 
 new "wait backend"
-sleep 1
-expecteof_netconf "$clixon_netconf -qef $cfg" 0 "$DEFAULTHELLO" \
-  "<rpc $DEFAULTNS><ping $LIBNS/></rpc>" \
-  "<ok/>"
+wait_backend
 
 new "clear autocli cache"
 expecteof_netconf "$clixon_netconf -qef $cfg" 0 "$DEFAULTHELLO" \

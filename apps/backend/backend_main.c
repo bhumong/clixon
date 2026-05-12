@@ -136,13 +136,12 @@ backend_terminate(clixon_handle h)
         unlink(sockpath);
     clixon_event_exit();
     clixon_debug(CLIXON_DBG_BACKEND, "done");
-
-    clixon_err_exit();
-    clixon_log_exit();
     stream_delete_all(h, 1);
     xmldb_delete_pattern(h, "^candidate");
     xmldb_disconnect(h);
+    clixon_err_exit();
     clixon_debug_exit();
+    clixon_log_exit();
     backend_handle_exit(h); /* Cannot use h after this. */
     return 0;
 }
@@ -934,10 +933,13 @@ main(int    argc,
         if (xmldb_copy_file(h, "running", "tmp") < 0)
             goto done;
         ret = startup_mode_startup(h, "tmp", cbret);
-        /* If ret fails, copy tmp back to running */
-        if (ret != 1)
-            if (xmldb_copy(h, "tmp", "running") < 0)
+        /* If ret fails, copy tmp back to running using file copy (symmetric
+         * with backup above) then clear stale in-memory cache */
+        if (ret != 1){
+            if (xmldb_copy_file(h, "tmp", "running") < 0)
                 goto done;
+            xmldb_clear(h, "running");
+        }
         xmldb_delete(h, "tmp");
         if (ret2status(ret, &status) < 0)
             goto done;
@@ -948,10 +950,13 @@ main(int    argc,
             goto done;
         /* Load and commit from startup */
         ret = startup_mode_startup(h, "startup", cbret);
-        /* If ret fails, copy tmp back to running */
-        if (ret != 1)
-            if (xmldb_copy(h, "tmp", "running") < 0)
+        /* If ret fails, copy tmp back to running using file copy (symmetric
+         * with backup above) then clear stale in-memory cache */
+        if (ret != 1){
+            if (xmldb_copy_file(h, "tmp", "running") < 0)
                 goto done;
+            xmldb_clear(h, "running");
+        }
         /* clear startup dbcache */
         xmldb_clear(h, "startup");
         if (ret2status(ret, &status) < 0)

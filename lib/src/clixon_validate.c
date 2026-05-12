@@ -93,7 +93,7 @@ struct leafref_opt {
     cxobj     *lc_cache_x0;    /* leafref xml node */
     cxobj    **lc_cache_xvec;
     size_t     lc_cache_xlen;
-    char      *lc_cache_xpath;  /* Cached xpath to distinguish union branches */
+    char      *lc_cache_xpath; /* Cached xpath to distinguish union branches */
     int        lc_bin_search;  /* Result is binary searchable */
     cxobj     *lc_bin_x0;      /* First object hit, derive y and parent */
 };
