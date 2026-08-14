@@ -91,6 +91,7 @@
 #include "clixon_xpath_optimize.h"
 #include "clixon_xpath_function.h"
 #include "clixon_xpath_eval.h"
+#include "banned.h"
 
 /* Mapping between XPath operator string <--> int  */
 const map_str2int xpopmap[] = {
@@ -412,6 +413,8 @@ xp_eval_step(xp_ctx     *xc0,
                 if (cxvec_append(xv, &vec, &veclen) < 0)
                     goto done;
             }
+            ctx_nodeset_replace(xc, vec, veclen);
+            vec = NULL;
             break;
         }
         if (xc->xc_descendant){
@@ -536,6 +539,8 @@ xp_eval_step(xp_ctx     *xc0,
     }
     retval = 0;
  done:
+    if (vec)
+        free(vec);
     if (xc)
         ctx_free(xc);
     return retval;
@@ -895,7 +900,8 @@ xp_relop(xp_ctx    *xc1,
     int     reverse = 0;
     double  n1, n2;
     char   *xb;
-    cg_var *cv1, *cv2;
+    cg_var *cv1 = NULL;
+    cg_var *cv2 = NULL;
     int     ret;
 
     if (xc1 == NULL || xc2 == NULL){

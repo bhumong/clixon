@@ -72,6 +72,7 @@
 #include "backend_get.h"
 #include "backend_cache.h"
 #include "backend_client.h"
+#include "banned.h"
 
 /*! Construct a client string description from client_entry information for logging
  *
@@ -273,8 +274,8 @@ backend_client_rm(clixon_handle h,
     }
 
     clixon_debug(CLIXON_DBG_BACKEND, "");
-    /* for all streams: XXX better to do it top-level? */
-    stream_ss_delete_all(h, ce_event_cb, (void*)ce);
+    /* Close socket before stream cleanup to prevent ce_event_cb(op=1) from
+     * recursively calling backend_client_rm on the same ce */
     c0 = backend_client_list(h);
     ce_prev = &c0; /* this points to stack and is not real backpointer */
     for (c = *ce_prev; c; c = c->ce_next){
@@ -288,6 +289,8 @@ backend_client_rm(clixon_handle h,
         }
         ce_prev = &c->ce_next;
     }
+    /* With ce_s == 0, ce_event_cb(op=1) will not recurse into backend_client_rm */
+    stream_ss_delete_all(h, ce_event_cb, (void*)ce);
     return backend_client_delete(h, ce); /* actually purge it */
 }
 
@@ -537,7 +540,7 @@ from_client_edit_config(clixon_handle h,
         goto ok;
     }
     /* xmldb_put (difflist handling) requires list keys */
-    if ((ret = xml_yang_validate_list_key_only(xc, &xret)) < 0)
+    if ((ret = xml_yang_validate_list_key_only(h, xc, &xret)) < 0)
         goto done;
     if (ret == 0){
         if (clixon_xml2cbuf1(cbret, xret, 0, 0, NULL, -1, 0, 0, WITHDEFAULTS_REPORT_ALL) < 0)
@@ -1045,7 +1048,7 @@ from_client_kill_session(clixon_handle h,
     int           ret;
 
     if ((x = xml_find(xe, "session-id")) == NULL ||
-        (str = xml_find_value(x, "body")) == NULL){
+        (str = xml_body(x)) == NULL){
         if (netconf_missing_element(cbret, "protocol", "session-id", NULL) < 0)
             goto done;
         goto ok;
@@ -1112,14 +1115,14 @@ from_client_create_subscription(clixon_handle h,
     if ((nsc = xml_nsctx_init(NULL, EVENT_RFC5277_NAMESPACE)) == NULL)
         goto done;
     if ((x = xpath_first(xe, nsc, "stream")) != NULL){
-        if ((stream = xml_find_value(x, "body")) == NULL){
+        if ((stream = xml_body(x)) == NULL){
             if (netconf_bad_element(cbret, "application", "stream", "Expected stream name") < 0)
                 goto done;
             goto ok;
         }
     }
     if ((x = xpath_first(xe, nsc, "stopTime")) != NULL){
-        if ((stoptime = xml_find_value(x, "body")) != NULL &&
+        if ((stoptime = xml_body(x)) != NULL &&
             str2time(stoptime, &stop) < 0){
             if (netconf_bad_element(cbret, "application", "stopTime", "Expected timestamp") < 0)
                 goto done;
@@ -1127,7 +1130,7 @@ from_client_create_subscription(clixon_handle h,
         }
     }
     if ((x = xpath_first(xe, nsc, "startTime")) != NULL){
-        if ((starttime = xml_find_value(x, "body")) != NULL &&
+        if ((starttime = xml_body(x)) != NULL &&
             str2time(starttime, &start) < 0){
             if (netconf_bad_element(cbret, "application", "startTime", "Expected timestamp") < 0)
                 goto done;
@@ -1586,6 +1589,7 @@ from_client_msg(clixon_handle h,
     char                *module = NULL;
     cbuf                *cbret = NULL; /* return message */
     char                *username;
+    char                *groupname;
     yang_stmt           *yspec;
     yang_stmt           *ye;
     yang_stmt           *ymod;
@@ -1733,10 +1737,12 @@ from_client_msg(clixon_handle h,
     netconf_monitoring_counter_inc(h, "in-rpcs");
     /* Message-id for replies */
     msg_id = xml_find_value(x, "message-id");
-
-    /* Username may be used by callbacks, etc */
+    /* Username may be used by callbacks, etc. Should be set for NACM to work properly */
     username = xml_find_value(x, "username");
     clicon_username_set(h, username);
+    /* Explicit groupname the client wants to match, instead of picking an implicit */
+    groupname = xml_find_value(x, "groupname");
+    clixon_groupname_set(h, groupname);
     ix = 0;
     while ((xe = xml_child_iter(x, &ix, CX_ELMNT)) != NULL) {
         rpc = xml_name(xe);
@@ -1768,6 +1774,9 @@ from_client_msg(clixon_handle h,
             goto done;
         if (ret == 2)
             goto reply;
+        /* Store peer identity in handle so NACM sub-functions can access it */
+        if (clixon_nacm_peername_set(h, ce->ce_username) < 0)
+            goto done;
         /* Cache XML NACM tree here. Use with caution, only valid on from_client_msg stack 
          */
         if (clicon_nacm_cache_set(h, xnacm) < 0)
@@ -1787,7 +1796,7 @@ from_client_msg(clixon_handle h,
                 goto reply;
             }
             /* NACM rpc operation exec validation */
-            if ((ret = nacm_rpc(rpc, module, username, xnacm, cbret)) < 0)
+            if ((ret = nacm_rpc(h, rpc, module, username, xnacm, cbret)) < 0)
                 goto done;
             if (ret == 0){ /* Not permitted and cbret set */
                 ce->ce_out_rpc_errors++;
@@ -1821,6 +1830,8 @@ from_client_msg(clixon_handle h,
             xml_free(xnacm);
             xnacm = NULL;
             if (clicon_nacm_cache_set(h, NULL) < 0)
+                goto done;
+            if (clixon_nacm_peername_set(h, NULL) < 0)
                 goto done;
         }
     } /* while */
@@ -1862,9 +1873,11 @@ from_client_msg(clixon_handle h,
     clixon_debug(CLIXON_DBG_BACKEND | CLIXON_DBG_DETAIL, "retval:%d", retval);
     if (xnacm){
         xml_free(xnacm);
+        xnacm = NULL;
         if (clicon_nacm_cache_set(h, NULL) < 0)
             goto done;
     }
+    clixon_nacm_peername_set(h, NULL); /* ensure cleared on all exit paths */
     if (xret)
         xml_free(xret);
     if (xt)
@@ -1912,7 +1925,6 @@ from_client(int   s,
         goto done;
     if (eof){
         release_all_dbs(h, ce, ce->ce_id);
-        stream_ss_delete_all(h, ce_event_cb, (void*)ce);
         backend_client_rm(h, ce);
         netconf_monitoring_counter_inc(h, "dropped-sessions");
     }

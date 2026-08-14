@@ -101,6 +101,7 @@
 #include "clixon_plugin.h"
 #include "clixon_options.h"
 #include "clixon_yang_type.h"
+#include "banned.h"
 
 /*
  * Local types and variables
@@ -660,7 +661,7 @@ cv_validate1(clixon_handle h,
                 retu = range_check(uu, cv1, cv2, uint32);
                 break;
             case CGV_UINT64:
-                uu =  cv_uint32_get(cv);
+                uu =  cv_uint64_get(cv);
                 retu = range_check(uu, cv1, cv2, uint64);
                 break;
             case CGV_STRING:
@@ -1409,6 +1410,11 @@ yang_type_resolve(yang_stmt   *yorig,
         /* Find associated type statement */
         if ((rytype = yang_find(rytypedef, Y_TYPE, NULL)) == NULL){
             clixon_err(OE_DB, 0, "mandatory type object is not found");
+            goto done;
+        }
+        /* Cycle detection: if rytype is the same pointer as ytype, we have a circular typedef */
+        if (rytype == ytype){
+            clixon_err(OE_YANG, 0, "Circular typedef reference: \"%s\"", type);
             goto done;
         }
         /* Recursively resolve this new type */

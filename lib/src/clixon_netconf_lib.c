@@ -78,6 +78,7 @@
 #include "clixon_yang_parse_lib.h"
 #include "clixon_plugin.h"
 #include "clixon_netconf_input.h"
+#include "banned.h"
 
 /* Mapping between RFC6243 withdefaults strings <--> ints
  */
@@ -2142,18 +2143,15 @@ clixon_netconf_internal_error(cxobj      *xerr,
 {
     int    retval = -1;
     cxobj *xr;
-    cxobj *xb;
 
-    if ((xr = xpath_first(xerr, NULL, "//error-tag")) != NULL &&
-        (xb = xml_body_get(xr))){
-        if (xml_value_set(xb, "operation-failed") < 0)
+    if ((xr = xpath_first(xerr, NULL, "//error-tag")) != NULL){
+        if (xml_body_set(xr, "operation-failed") < 0)
             goto done;
     }
-    if ((xr = xpath_first(xerr, NULL, "//error-message")) != NULL &&
-        (xb = xml_body_get(xr))){
-        if (xml_value_append(xb, msg) < 0)
+    if ((xr = xpath_first(xerr, NULL, "//error-message")) != NULL){
+        if (xml_body_append(xr, msg) < 0)
             goto done;
-        if (arg &&xml_value_append(xb, arg) < 0)
+        if (arg && xml_body_append(xr, arg) < 0)
             goto done;
     }
     retval = 0;
@@ -2521,6 +2519,11 @@ netconf_input_chunked_framing(char    ch,
         break;
     case 3:
         if (ch >= '0' && ch <= '9'){ /* other nums */
+            /* RFC 6242: chunk-size max is 4294967295. Reject overflow / oversize */
+            if (*size > (UINT32_MAX - (size_t)(ch - '0')) / 10){
+                clixon_err(OE_NETCONF, 0, "NETCONF framing error chunk-size: exceeds RFC6242 maximum 4294967295");
+                goto err;
+            }
             *size = (*size)*10 + ch-'0';
             break;
         }
@@ -2609,4 +2612,29 @@ netconf_cbuf_err2cb(clixon_handle h,
     if (xerr)
         xml_free(xerr);
     return retval;
+}
+
+/*! Return the NETCONF error-tag body from an rpc-reply/rpc-error XML tree
+ *
+ * Utility for callers that need to map a NETCONF error-tag (RFC 6241 App. A)
+ * to a protocol-specific status code (eg RESTCONF HTTP status or gNMI/gRPC
+ * status), given the reply from clicon_rpc_netconf() or similar.
+ *
+ * @param[in]  xret  rpc-reply xml (or a subtree possibly containing rpc-error)
+ * @retval     tag   error-tag body string (points into xret, do not free)
+ * @retval     NULL  No rpc-error/error-tag found
+ */
+char *
+netconf_reply_err_tag(cxobj *xret)
+{
+    cxobj *xerr;
+    cxobj *xtag;
+
+    if (xret == NULL)
+        return NULL;
+    if ((xerr = xpath_first(xret, NULL, "//rpc-error")) == NULL)
+        return NULL;
+    if ((xtag = xml_find_type(xerr, NULL, "error-tag", CX_ELMNT)) == NULL)
+        return NULL;
+    return xml_body(xtag);
 }

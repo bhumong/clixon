@@ -56,31 +56,10 @@
 #include <clixon/clixon.h>
 
 #include "grpc_nghttp2.h"
+#include "banned.h"
 
 /* Command line options */
 #define GRPC_OPTS "hD:f:l:p:d1"
-
-/*! Usage help routine
- *
- * @param[in]  h      Clixon handle
- * @param[in]  argv0  command line
- */
-static int
-usage(clixon_handle h,
-      const char   *argv0)
-{
-    fprintf(stderr, "usage:%s [options]\n"
-            "where options are\n"
-            "\t-h \t\tHelp\n"
-            "\t-D <level>\tDebug level\n"
-            "\t-f <file>\tClixon config file\n"
-            "\t-l <s|e|o|n|f<file>> \tLog on (s)yslog, std(e)rr, std(o)ut, (n)one or (f)ile\n"
-            "\t-p <port>\tgRPC listen port (default: 9339)\n"
-            "\t-d \t\tDaemonize\n"
-            "\t-1 \t\tOneshot: connect to backend and exit\n",
-            argv0);
-    exit(0);
-}
 
 /*! Cleanup and terminate gRPC daemon
  *
@@ -104,10 +83,36 @@ grpc_terminate(clixon_handle h)
     xpath_optimize_exit();
     clixon_event_exit();
     clixon_err_exit();
-    clixon_log_exit();
     clixon_debug_exit();
+    clixon_log_exit();
     clixon_handle_exit(h);
     return 0;
+}
+
+/*! Usage help routine
+ *
+ * @param[in]  h      Clixon handle
+ * @param[in]  argv0  command line
+ */
+static int
+usage(clixon_handle h,
+      const char   *argv0)
+{
+    fprintf(stderr, "usage:%s [options]\n"
+            "where options are\n"
+            "\t-h \t\tHelp\n"
+            "\t-D <level> \tDebug level (see available levels below)\n"
+            "\t-f <file>\tClixon config file\n"
+            "\t-l <s|e|o|n|f<file>> \tLog on (s)yslog, std(e)rr, std(o)ut, (n)one or (f)ile\n"
+            "\t-p <port>\tgRPC listen port (default: 9339)\n"
+            "\t-d \t\tDaemonize\n"
+            "\t-1 \t\tOneshot: connect to backend and exit\n",
+            argv0);
+    fprintf(stderr, "Debug keys: ");
+    clixon_debug_key_dump(stderr);
+    fprintf(stderr, "\n");
+    grpc_terminate(h);
+    exit(0);
 }
 
 /*! Quit
@@ -145,6 +150,7 @@ main(int    argc,
     yang_stmt     *yspec;
     cvec          *nsctx_global = NULL;
     char          *str;
+    int32_t        d;
 
     /* Create clixon handle */
     if ((h = clixon_handle_init()) == NULL)
@@ -158,8 +164,17 @@ main(int    argc,
             usage(h, argv0);
             break;
         case 'D':
-            if (sscanf(optarg, "%d", &dbg) != 1)
-                usage(h, argv0);
+            /* Try first symbolic, then numeric match
+             * Cant use yang_bits_map, too early in bootstrap, there is no yang */
+            if ((d = clixon_debug_str2key(optarg)) < 0){
+                uint32_t u;
+                if (parse_uint32(optarg, &u, NULL) <= 0)
+                    usage(h, argv[0]);
+                else
+                    dbg |= u;
+            }
+            else
+                dbg |= d;
             break;
         case 'f':
             if (!strlen(optarg))

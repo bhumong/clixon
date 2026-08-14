@@ -77,9 +77,17 @@
 #include "restconf_http1.h"
 #endif
 #include "restconf_stream.h"
+#include "banned.h"
+
+/* Max seconds a connection may wait for a complete HTTP/1 request header
+ * before being closed. See #667. */
+#define RESTCONF_HEADER_TIMEOUT_S 10
 
 /* Forward */
 static int restconf_idle_cb(int fd, void *arg);
+static int restconf_header_timeout_cb(int fd, void *arg);
+static int restconf_header_timer_reg(restconf_conn *rc);
+static int restconf_header_timer_unreg(restconf_conn *rc);
 
 /*! Create restconf stream
  *
@@ -534,6 +542,36 @@ native_send_badrequest(clixon_handle    h,
 }
 
 #ifdef HAVE_HTTP1
+/*! Send a 413 Payload Too Large reply and close
+ *
+ * @param[in]  h    Clixon handle
+ * @param[in]  rc   Restconf connection, note may be closed in this
+ * @retval     1    OK
+ * @retval     0    OK, but socket write returned error, caller should close rc
+ * @retval    -1    Error
+ */
+static int
+native_send_payload_too_large(clixon_handle  h,
+                              restconf_conn *rc)
+{
+    int   retval = -1;
+    cbuf *cb = NULL;
+
+    clixon_debug(CLIXON_DBG_RESTCONF, "");
+    if ((cb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+    cprintf(cb, "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n");
+    cprintf(cb, "Content-Length: 0\r\n");
+    cprintf(cb, "\r\n");
+    retval = native_buf_write(h, cbuf_get(cb), cbuf_len(cb), rc, __func__);
+ done:
+    if (cb)
+        cbuf_free(cb);
+    return retval;
+}
+
 /*! Clear all input stream data if input is interrupted for some reason
  *
  * Only used by HTTP/1.
@@ -682,6 +720,9 @@ restconf_http1_process(restconf_conn *rc,
     int                   status;
     cbuf                 *cberr = NULL;
     int                   ret;
+    const char           *inbuf;
+    size_t                buflen;
+    int                   looks_http;
 
     h = rc->rc_h;
     if ((sd = restconf_stream_find(rc, 0)) == NULL){
@@ -707,15 +748,49 @@ restconf_http1_process(restconf_conn *rc,
             clixon_err(OE_UNIX, errno, "cbuf_append");
             goto done;
         }
+        if (cbuf_len(sd->sd_indata) > RESTCONF_REQUEST_BODY_MAX){
+            clixon_log(h, LOG_WARNING, "restconf request body exceeds %d bytes",
+                       RESTCONF_REQUEST_BODY_MAX);
+            if (native_send_payload_too_large(h, rc) < 0)
+                goto done;
+            if (http1_native_clear_input(h, sd) < 0)
+                goto done;
+            if (restconf_close_ssl_socket(rc, __func__, 0) < 0)
+                goto done;
+            rc = NULL;
+            goto closed;
+        }
     }
     else {
-        /* multi-buffer for multiple reads 
+        /* multi-buffer for multiple reads
          * This is different from sd_indata that it is before and includes headers
          */
         if (cbuf_append_buf(sd->sd_inbuf, buf, n) < 0){
             clixon_err(OE_UNIX, errno, "cbuf_append");
             goto done;
         }
+        /* Wait for full header before parsing (#667). Only delay when the
+         * request line starts with a RESTCONF-accepted method; anything
+         * else (e.g. TLS handshake on an HTTP port) is left for the parser
+         * to reject with 400. Need >= 8 bytes (longest is "OPTIONS ") to
+         * classify; until then, assume incomplete and wait. */
+        inbuf = cbuf_get(sd->sd_inbuf);
+        buflen = cbuf_len(sd->sd_inbuf);
+        looks_http = buflen < 8 ||
+            strncmp(inbuf, "OPTIONS ", 8) == 0 ||
+            strncmp(inbuf, "HEAD ",    5) == 0 ||
+            strncmp(inbuf, "GET ",     4) == 0 ||
+            strncmp(inbuf, "POST ",    5) == 0 ||
+            strncmp(inbuf, "PUT ",     4) == 0 ||
+            strncmp(inbuf, "PATCH ",   6) == 0 ||
+            strncmp(inbuf, "DELETE ",  7) == 0;
+        if (looks_http && my_memmem(inbuf, buflen, "\r\n\r\n", 4) == NULL){
+            if (restconf_header_timer_reg(rc) < 0)
+                goto done;
+            goto ok;
+        }
+        if (restconf_header_timer_unreg(rc) < 0)
+            goto done;
         if (clixon_http1_parse_string(h, rc, cbuf_get(sd->sd_inbuf)) < 0){
             /* XXX This does not work for SSL */
             if (rc->rc_ssl){
@@ -1053,6 +1128,67 @@ restconf_idle_timer_unreg(restconf_conn *rc)
     return clixon_event_unreg_timeout(restconf_idle_cb, rc);
 }
 
+/*! Register one-shot timer that bounds the wait for a complete HTTP/1 header
+ *
+ * Prevents a peer from holding a connection open indefinitely by sending only
+ * part of an HTTP request line / headers. Fires once after
+ * RESTCONF_HEADER_TIMEOUT_S; the callback closes the socket. See #667.
+ *
+ * @param[in]  rc   Restconf connection
+ * @retval     0    OK
+ * @retval    -1    Error
+ */
+static int
+restconf_header_timer_reg(restconf_conn *rc)
+{
+    int            retval = -1;
+    struct timeval now;
+    struct timeval t;
+    struct timeval to = {RESTCONF_HEADER_TIMEOUT_S, 0};
+
+    if (rc->rc_header_timer)
+        goto ok;
+    gettimeofday(&now, NULL);
+    timeradd(&now, &to, &t);
+    if (clixon_event_reg_timeout(t, restconf_header_timeout_cb, rc,
+                                 "restconf http/1 header timeout") < 0)
+        goto done;
+    rc->rc_header_timer = 1;
+ ok:
+    retval = 0;
+ done:
+    return retval;
+}
+
+static int
+restconf_header_timer_unreg(restconf_conn *rc)
+{
+    if (!rc->rc_header_timer)
+        return 0;
+    rc->rc_header_timer = 0;
+    return clixon_event_unreg_timeout(restconf_header_timeout_cb, rc);
+}
+
+/*! Header timeout callback - close connection on partial-header stall
+ *
+ * @param[in]  fd   Unused
+ * @param[in]  arg  restconf_conn *
+ * @retval     0    OK
+ * @retval    -1    Error
+ */
+static int
+restconf_header_timeout_cb(int   fd,
+                           void *arg)
+{
+    restconf_conn *rc = (restconf_conn *)arg;
+
+    if (rc == NULL)
+        return -1;
+    clixon_debug(CLIXON_DBG_RESTCONF, "%d header timeout, closing", rc->rc_s);
+    rc->rc_header_timer = 0;
+    return restconf_close_ssl_socket(rc, __func__, 0);
+}
+
 /*! Close Restconf native connection socket and unregister callback
  *
  * For callhome also start reconnect timer
@@ -1077,6 +1213,8 @@ restconf_connection_close1(restconf_conn *rc)
         goto done;
     }
     clixon_event_unreg_fd(rc->rc_s, restconf_connection);
+    if (restconf_header_timer_unreg(rc) < 0)
+        goto done;
     /* re-set timer */
     if (rc->rc_callhome){
         if (rsock->rs_periodic)

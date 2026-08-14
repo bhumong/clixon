@@ -39,32 +39,42 @@
 /*
  * Types
  */
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+
+/* Encapsulate state of parser making it restconf independent and reentrant */
 struct clixon_http1_yacc {
-    const char   *hy_name;         /* Name of syntax (for error string) */
-    clixon_handle hy_h;            /* Clixon handle */
-    restconf_conn *hy_rc;          /* Connection handle */
-    int           hy_linenum;      /* Number of \n in parsed buffer */
-    char         *hy_parse_string; /* original (copy of) parse string */
-    void         *hy_lexbuf;       /* internal parse buffer from lex */
+    const char    *hy_name;         /* Name of syntax (for error string) */
+    clixon_handle  hy_h;            /* Clixon handle */
+    int            hy_linenum;      /* Number of \n in parsed buffer */
+    int            hy_proto_d1;     /* parsed version digit 1 */
+    int            hy_proto_d2;     /* parsed version digit 2 */
+    char          *hy_parse_string; /* original (copy of) parse string */
+    void          *hy_lexbuf;       /* internal parse buffer from lex */
+    yyscan_t       hy_scanner;      /* reentrant flex scanner handle */
+    cvec          *hy_header;       /* Header fields */
+    cvec          *hy_qvec;         /* Query fields by ref */
+    cbuf          *hy_indata;       /* Indata cbuf by ref */
+
 };
 typedef struct clixon_http1_yacc clixon_http1_yacc;
 
 /*
- * Variables
- */
-extern char *clixon_http1_parsetext;
-
-/*
  * Prototypes
  */
-int http1_scan_init(clixon_http1_yacc *);
-int http1_scan_exit(clixon_http1_yacc *);
+union YYSTYPE;
 
-int http1_parse_init(clixon_http1_yacc *);
-int http1_parse_exit(clixon_http1_yacc *);
+int   http1_scan_init(clixon_http1_yacc *);
+int   http1_scan_exit(clixon_http1_yacc *);
 
-int clixon_http1_parselex(void *);
-int clixon_http1_parseparse(void *);
-void clixon_http1_parseerror(void *, char*);
+int   http1_parse_init(clixon_http1_yacc *);
+int   http1_parse_exit(clixon_http1_yacc *);
+
+char *clixon_http1_parseget_text(yyscan_t yyscanner);
+int   clixon_http1_parselex(union YYSTYPE *yylval, yyscan_t yyscanner);
+int   clixon_http1_parseparse(void *, yyscan_t);
+void  clixon_http1_parseerror(void *, yyscan_t, char*);
 
 #endif  /* _CLIXON_HTTP1_PARSE_H_ */

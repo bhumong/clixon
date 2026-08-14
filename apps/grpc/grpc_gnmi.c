@@ -54,11 +54,101 @@
 /* clixon */
 #include <clixon/clixon.h>
 
-/* generated protobuf */
+/* generated protobuf — fields marked deprecated in the gNMI proto are reflected
+ * in the generated header and its init macros; suppress -Wdeprecated-declarations
+ * for this file since we cannot modify the official gNMI .proto file */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "gnmi.pb-c.h"
 
 #include "grpc_nghttp2.h"
 #include "grpc_gnmi.h"
+#include "banned.h"
+
+/*! Map from NETCONF error-tag (RFC 6241 App. A) to gRPC status code
+ *
+ * NETCONF error-tags carried in an rpc-error are translated to the closest
+ * gRPC status (https://grpc.github.io/grpc/core/md_doc_statuscodes.html)
+ * @see netconf_grpc_map (RESTCONF equivalent) in apps/restconf/restconf_lib.c
+ */
+static const map_str2int netconf_grpc_map[] = {
+    {"invalid-value",           GRPC_INVALID_ARGUMENT},
+    {"too-big",                 GRPC_INVALID_ARGUMENT},
+    {"missing-attribute",       GRPC_INVALID_ARGUMENT},
+    {"bad-attribute",           GRPC_INVALID_ARGUMENT},
+    {"unknown-attribute",       GRPC_INVALID_ARGUMENT},
+    {"missing-element",         GRPC_INVALID_ARGUMENT},
+    {"bad-element",             GRPC_INVALID_ARGUMENT},
+    {"unknown-element",         GRPC_INVALID_ARGUMENT},
+    {"unknown-namespace",       GRPC_INVALID_ARGUMENT},
+    {"malformed-message",       GRPC_INVALID_ARGUMENT},
+    {"access-denied",           GRPC_PERMISSION_DENIED},
+    {"data-exists",             GRPC_ALREADY_EXISTS},
+    {"data-missing",            GRPC_FAILED_PRECONDITION},
+    {"in-use",                  GRPC_FAILED_PRECONDITION},
+    {"lock-denied",             GRPC_FAILED_PRECONDITION},
+    {"resource-denied",         GRPC_FAILED_PRECONDITION},
+    {"rollback-failed",         GRPC_INTERNAL},
+    {"partial-operation",       GRPC_INTERNAL},
+    {"operation-not-supported", GRPC_UNIMPLEMENTED},
+    {"operation-failed",        GRPC_FAILED_PRECONDITION},
+    {NULL,                      -1}
+};
+
+/*! Translate a NETCONF error-tag to a gRPC status code
+ *
+ * @param[in]  tag  NETCONF error-tag string (may be NULL)
+ * @retval     grpc status code, GRPC_FAILED_PRECONDITION if tag unknown/NULL
+ */
+static int
+gnmi_errtag2status(const char *tag)
+{
+    int status;
+
+    if (tag == NULL || (status = clicon_str2int(netconf_grpc_map, tag)) < 0)
+        return GRPC_FAILED_PRECONDITION;
+    return status;
+}
+
+/*! Build a NETCONF RPC in a cbuf, send it, and map any rpc-error to gRPC status
+ *
+ * Mirrors the RESTCONF pattern (construct RPC in a cbuf, send via
+ * clicon_rpc_netconf, inspect the reply for rpc-error). On a NETCONF error the
+ * detailed reason is set via clixon_err_netconf() (so it reaches the
+ * grpc-message trailer) and the error-tag is mapped to a gRPC status code.
+ *
+ * @param[in]   h            Clixon handle
+ * @param[in]   rpcstr       NETCONF RPC as a string (<rpc>...</rpc>)
+ * @param[in]   errprefix    Prefix for the error reason (eg "edit-config")
+ * @param[out]  grpc_status  gRPC status code, set on NETCONF error
+ * @retval      1            OK, no error
+ * @retval      0            NETCONF error returned (reason + grpc_status set)
+ * @retval     -1            Fatal error
+ */
+static int
+gnmi_rpc_send(clixon_handle h,
+              const char   *rpcstr,
+              const char   *errprefix,
+              int          *grpc_status)
+{
+    int    retval = -1;
+    cxobj *xret = NULL;
+    cxobj *xerr;
+
+    if (clicon_rpc_netconf(h, rpcstr, &xret, NULL) < 0)
+        goto done;
+    if ((xerr = xpath_first(xret, NULL, "//rpc-error")) != NULL){
+        clixon_err_netconf(h, OE_NETCONF, 0, xerr, "%s", errprefix);
+        *grpc_status = gnmi_errtag2status(netconf_reply_err_tag(xret));
+        retval = 0;
+        goto done;
+    }
+    retval = 1;
+ done:
+    if (xret)
+        xml_free(xret);
+    return retval;
+}
 
 /*! Build gNMI CapabilityResponse and serialize it
  *
@@ -238,6 +328,34 @@ gnmi_find_namespace(clixon_handle h,
     return NULL;
 }
 
+/*! Validate a gNMI-supplied element/key name is a safe identifier
+ *
+ * gNMI path element and key names become XML element/tag names and XPath node
+ * names; these cannot be escaped, so reject any name containing characters
+ * outside a conservative YANG-identifier set (alphanumeric, '_', '-', '.') to
+ * prevent XML/XPath structure injection.
+ * @param[in]  name  Candidate name
+ * @retval     1     Valid
+ * @retval     0     Invalid (NULL, empty, or illegal character)
+ */
+static int
+gnmi_name_valid(const char *name)
+{
+    const char *p;
+
+    if (name == NULL || *name == '\0')
+        return 0;
+    for (p = name; *p; p++){
+        if ((*p >= 'A' && *p <= 'Z') ||
+            (*p >= 'a' && *p <= 'z') ||
+            (*p >= '0' && *p <= '9') ||
+            *p == '_' || *p == '-' || *p == '.')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
 /*! Resolve the namespace and local name for a gNMI path element
  *
  * gNMI uses YANG module-qualified names ("module:localname") to identify
@@ -371,18 +489,20 @@ gnmi_find_yparent(clixon_handle h,
  * registers each distinct namespace with a unique prefix, then issues
  * clicon_rpc_get against the running datastore.
  *
- * @param[in]  h        Clixon handle
- * @param[in]  gpath    gNMI Path to query (may be NULL)
- * @param[in]  content  CONTENT_ALL, CONTENT_CONFIG, or CONTENT_NONCONFIG
- * @param[out] xretp    XML result tree; caller must xml_free()
- * @retval     0        OK
- * @retval    -1        Error
+ * @param[in]  h           Clixon handle
+ * @param[in]  gpath       gNMI Path to query (may be NULL)
+ * @param[in]  content     CONTENT_ALL, CONTENT_CONFIG, or CONTENT_NONCONFIG
+ * @param[out] xretp       XML result tree; caller must xml_free()
+ * @param[out] grpc_status gRPC status code on error
+ * @retval     0           OK
+ * @retval    -1           Error
  */
 static int
 gnmi_get_one_path(clixon_handle h,
                   Gnmi__Path   *gpath,
                   int           content,
-                  cxobj       **xretp)
+                  cxobj       **xretp,
+                  int          *grpc_status)
 {
     int                       retval = -1;
     cvec                     *nsc = NULL;
@@ -400,6 +520,8 @@ gnmi_get_one_path(clixon_handle h,
     const char               *ens;
     const char               *local;
     char                     *pfx;
+
+    *grpc_status = GRPC_INTERNAL;
 
     if ((xpathcb = cbuf_new()) == NULL){
         clixon_err(OE_UNIX, errno, "cbuf_new");
@@ -439,9 +561,26 @@ gnmi_get_one_path(clixon_handle h,
             }
             pfx = NULL;
             xml_nsctx_get_prefix(nsc, ens, &pfx);
+            if (!gnmi_name_valid(local)){
+                clixon_err(OE_XML, EINVAL, "Invalid gNMI element name in path");
+                *grpc_status = GRPC_INVALID_ARGUMENT;
+                goto done;
+            }
             cprintf(xpathcb, "/%s:%s", pfx, local);
             for (nk = 0; nk < elem->n_key; nk++){
                 ke = elem->key[nk];
+                if (!gnmi_name_valid(ke->key)){
+                    clixon_err(OE_XML, EINVAL, "Invalid gNMI key name in path");
+                    *grpc_status = GRPC_INVALID_ARGUMENT;
+                    goto done;
+                }
+                /* XPath 1.0 single-quoted literals cannot escape a quote, so
+                 * reject key values containing one (prevents XPath injection) */
+                if (ke->value != NULL && strchr(ke->value, '\'') != NULL){
+                    clixon_err(OE_XML, EINVAL, "Invalid gNMI key value: contains quote");
+                    *grpc_status = GRPC_INVALID_ARGUMENT;
+                    goto done;
+                }
                 cprintf(xpathcb, "[%s:%s='%s']", pfx, ke->key, ke->value);
             }
         }
@@ -550,7 +689,7 @@ gnmi_get(clixon_handle  h,
             xml_free(xret);
             xret = NULL;
         }
-        if (gnmi_get_one_path(h, req->path[i], content, &xret) < 0)
+        if (gnmi_get_one_path(h, req->path[i], content, &xret, grpc_status) < 0)
             goto done;
 
         /* Build JSON from the returned XML subtree */
@@ -732,8 +871,9 @@ gnmi_extract_value_string(Gnmi__TypedValue *tv)
  *
  * Generates the element tree corresponding to the path, placing list key
  * subelements inline.  If value is non-NULL it is placed inside the innermost
- * element (leaf case).  If op is not OP_MERGE, nc:operation="<op>" is added as
- * an attribute on the outermost element so delete/replace apply per-node.
+ * element (leaf case).  nc:operation="<op>" is added as an attribute on the
+ * innermost element for all operations including merge, so all edits can be
+ * batched into a single edit-config with default-operation=none.
  * The result is appended to cb without the outer <config> wrapper.
  *
  * @param[in]  h      Clixon handle (namespace lookup)
@@ -741,6 +881,7 @@ gnmi_extract_value_string(Gnmi__TypedValue *tv)
  * @param[in]  value  Leaf value string, or NULL for delete/container
  * @param[in]  op     Operation (OP_MERGE, OP_REPLACE, OP_REMOVE)
  * @param[in]  cb     Output buffer to append to
+ * @param[out] grpc_status  gRPC status code on error
  * @retval     0      OK
  * @retval    -1      Error
  */
@@ -749,7 +890,8 @@ gnmi_path_to_xml(clixon_handle       h,
                  Gnmi__Path         *path,
                  const char         *value,
                  enum operation_type op,
-                 cbuf               *cb)
+                 cbuf               *cb,
+                 int                *grpc_status)
 {
     const char             *ns = NULL;
     const char             *opstr = NULL;
@@ -764,8 +906,7 @@ gnmi_path_to_xml(clixon_handle       h,
 
     if (path == NULL || path->n_elem == 0)
         return 0;
-    if (op != OP_MERGE)
-        opstr = xml_operation2str(op);
+    opstr = xml_operation2str(op);
 
     /* Seed yparent from the top-level element for YANG traversal fallback */
     /* Open elements, emitting xmlns when namespace changes.
@@ -786,13 +927,23 @@ gnmi_path_to_xml(clixon_handle       h,
         if (ns == NULL)
             ns = ens;
 
+        if (!gnmi_name_valid(local)){
+            clixon_err(OE_XML, EINVAL, "Invalid gNMI element name in path");
+            *grpc_status = GRPC_INVALID_ARGUMENT;
+            return -1;
+        }
+
+        /* nc:operation goes on the innermost (last) element only, so that
+         * intermediate containers are not themselves deleted/replaced. */
+        int is_last = (j == path->n_elem - 1);
+
         if (j == 0){
-            if (ens != NULL && opstr != NULL)
+            if (ens != NULL && opstr != NULL && is_last)
                 cprintf(cb, "<%s xmlns=\"%s\" xmlns:nc=\"%s\" nc:operation=\"%s\">",
                         local, ens, NETCONF_BASE_NAMESPACE, opstr);
             else if (ens != NULL)
                 cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
-            else if (opstr != NULL)
+            else if (opstr != NULL && is_last)
                 cprintf(cb, "<%s xmlns:nc=\"%s\" nc:operation=\"%s\">",
                         local, NETCONF_BASE_NAMESPACE, opstr);
             else
@@ -801,20 +952,37 @@ gnmi_path_to_xml(clixon_handle       h,
         } else {
             /* Emit xmlns only when namespace changes from parent */
             if (ens != NULL && (prev_ns == NULL || strcmp(ens, prev_ns) != 0)){
-                cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
+                if (opstr != NULL && is_last)
+                    cprintf(cb, "<%s xmlns=\"%s\" xmlns:nc=\"%s\" nc:operation=\"%s\">",
+                            local, ens, NETCONF_BASE_NAMESPACE, opstr);
+                else
+                    cprintf(cb, "<%s xmlns=\"%s\">", local, ens);
                 prev_ns = ens;
             } else {
-                cprintf(cb, "<%s>", local);
+                if (opstr != NULL && is_last)
+                    cprintf(cb, "<%s xmlns:nc=\"%s\" nc:operation=\"%s\">",
+                            local, NETCONF_BASE_NAMESPACE, opstr);
+                else
+                    cprintf(cb, "<%s>", local);
             }
         }
         for (nk = 0; nk < elem->n_key; nk++){
             ke = elem->key[nk];
-            cprintf(cb, "<%s>%s</%s>", ke->key, ke->value, ke->key);
+            if (!gnmi_name_valid(ke->key)){
+                clixon_err(OE_XML, EINVAL, "Invalid gNMI key name in path");
+                *grpc_status = GRPC_INVALID_ARGUMENT;
+                return -1;
+            }
+            cprintf(cb, "<%s>", ke->key);
+            if (xml_chardata_cbuf_append(cb, 0, ke->value) < 0)
+                return -1;
+            cprintf(cb, "</%s>", ke->key);
         }
     }
     /* Leaf value inside innermost element */
     if (value != NULL)
-        cprintf(cb, "%s", value);
+        if (xml_chardata_cbuf_append(cb, 0, value) < 0)
+            return -1;
     /* Close all elements in reverse order */
     for (j = path->n_elem; j > 0; j--){
         gnmi_resolve_elem_ns(h, path->elem[j-1]->name, NULL, NULL, &local);
@@ -823,10 +991,63 @@ gnmi_path_to_xml(clixon_handle       h,
     return 0;
 }
 
+/*! Send one edit-config RPC to the candidate datastore (no commit)
+ *
+ * Builds a full edit-config RPC (default-operation=none) around the given XML
+ * body and sends it via clicon_rpc_netconf.  Each node in xmlbody must already
+ * carry an nc:operation attribute.  On a NETCONF error the detailed reason is
+ * set and the error-tag is mapped to a gRPC status code.
+ *
+ * @param[in]   h            Clixon handle
+ * @param[in]   xmlbody      XML content to wrap in <config>...</config>
+ * @param[out]  grpc_status  gRPC status code, set on NETCONF error
+ * @retval      1            OK
+ * @retval      0            NETCONF error (reason + grpc_status set)
+ * @retval     -1            Fatal error
+ */
+static int
+gnmi_edit_candidate(clixon_handle h,
+                    cbuf         *xmlbody,
+                    int          *grpc_status)
+{
+    int      retval = -1;
+    cbuf    *cb = NULL;
+    char    *username;
+    char    *groupname;
+
+    if ((cb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+    cprintf(cb, "<rpc xmlns=\"%s\"", NETCONF_BASE_NAMESPACE);
+    cprintf(cb, " xmlns:%s=\"%s\"", NETCONF_BASE_PREFIX, NETCONF_BASE_NAMESPACE);
+    if ((username = clicon_username_get(h)) != NULL)
+        cprintf(cb, " %s:username=\"%s\"", CLIXON_LIB_PREFIX, username);
+    if ((groupname = clixon_groupname_get(h)) != NULL)
+        cprintf(cb, " %s:groupname=\"%s\"", CLIXON_LIB_PREFIX, groupname);
+    if (username != NULL || groupname != NULL)
+        cprintf(cb, " xmlns:%s=\"%s\"", CLIXON_LIB_PREFIX, CLIXON_LIB_NS);
+    cprintf(cb, " %s", NETCONF_MESSAGE_ID_ATTR);
+    cprintf(cb, "><edit-config><target><candidate/></target>");
+    cprintf(cb, "<default-operation>none</default-operation>");
+    cprintf(cb, "<config>%s</config>", cbuf_get(xmlbody));
+    cprintf(cb, "</edit-config></rpc>");
+    retval = gnmi_rpc_send(h, cbuf_get(cb), "edit-config", grpc_status);
+ done:
+    if (cb)
+        cbuf_free(cb);
+    return retval;
+}
+
 /*! Handle gNMI Set RPC
  *
- * Processes delete, replace, and update operations from a SetRequest in order,
- * applies all edits to the candidate datastore, then commits.
+ * Processes delete, replace, and update operations from a SetRequest in order
+ * per RFC gNMI section 3.4.3 (transactional semantics): each operation is
+ * sent as a separate edit-config to the candidate datastore, then a single
+ * commit is issued so that YANG validation (including mandatory leaves) runs
+ * against the complete resulting candidate.  If the commit fails, discard-changes
+ * is called to restore the candidate to the running state.
+ *
  * Supported value encodings: JSON_IETF, JSON, STRING.
  *
  * @param[in]  h            Clixon handle
@@ -861,6 +1082,7 @@ gnmi_set(clixon_handle  h,
     uint8_t               *buf = NULL;
     size_t                 sz;
     int                    any = 0;
+    int                    ret;
 
     *grpc_status = GRPC_FAILED_PRECONDITION;
 
@@ -880,27 +1102,27 @@ gnmi_set(clixon_handle  h,
     }
     ri = 0;
 
-    /* 1. Process deletes (OP_REMOVE — no error if path absent) */
+    if ((xmlcb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+
+    /* 1. Process deletes (OP_REMOVE — no error if path absent).
+     * Each delete is sent as a separate edit-config so that the candidate
+     * accumulates all changes before the final commit. */
     for (i = 0; i < req->n_delete_; i++){
         dpath = req->delete_[i];
-
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            goto done;
-        }
-        cprintf(xmlcb, "<config>");
-        if (gnmi_path_to_xml(h, dpath, NULL, OP_REMOVE, xmlcb) < 0)
-            goto done;
-        cprintf(xmlcb, "</config>");
-        if (clicon_rpc_edit_config(h, "candidate", OP_NONE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
+        cbuf_reset(xmlcb);
+        if (gnmi_path_to_xml(h, dpath, NULL, OP_REMOVE, xmlcb, grpc_status) < 0)
+            goto discard;
+        if ((ret = gnmi_edit_candidate(h, xmlcb, grpc_status)) < 0)
+            goto discard;
+        if (ret == 0) /* NETCONF error: reason + grpc_status set */
+            goto discard;
         any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
-            goto done;
+            goto discard;
         }
         gnmi__update_result__init(ur);
         ur->path = dpath;
@@ -911,31 +1133,23 @@ gnmi_set(clixon_handle  h,
     /* 2. Process replaces (OP_REPLACE) */
     for (i = 0; i < req->n_replace; i++){
         upd = req->replace[i];
-
         if (upd->val == NULL)
             continue;
         if ((val = gnmi_extract_value_string(upd->val)) == NULL)
             continue;
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            free(val);
-            goto done;
+        cbuf_reset(xmlcb);
+        if (gnmi_path_to_xml(h, upd->path, val, OP_REPLACE, xmlcb, grpc_status) < 0){
+            free(val); goto discard;
         }
-        cprintf(xmlcb, "<config>");
-        if (gnmi_path_to_xml(h, upd->path, val, OP_REPLACE, xmlcb) < 0){
-            free(val); goto done;
-        }
-        cprintf(xmlcb, "</config>");
         free(val);
-        if (clicon_rpc_edit_config(h, "candidate", OP_NONE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
+        if ((ret = gnmi_edit_candidate(h, xmlcb, grpc_status)) < 0)
+            goto discard;
+        if (ret == 0) /* NETCONF error: reason + grpc_status set */
+            goto discard;
         any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
-            goto done;
+            goto discard;
         }
         gnmi__update_result__init(ur);
         ur->path = upd->path;
@@ -946,31 +1160,23 @@ gnmi_set(clixon_handle  h,
     /* 3. Process updates (OP_MERGE) */
     for (i = 0; i < req->n_update; i++){
         upd = req->update[i];
-
         if (upd->val == NULL)
             continue;
         if ((val = gnmi_extract_value_string(upd->val)) == NULL)
             continue;
-        if ((xmlcb = cbuf_new()) == NULL){
-            clixon_err(OE_UNIX, errno, "cbuf_new");
-            free(val);
-            goto done;
+        cbuf_reset(xmlcb);
+        if (gnmi_path_to_xml(h, upd->path, val, OP_MERGE, xmlcb, grpc_status) < 0){
+            free(val); goto discard;
         }
-        cprintf(xmlcb, "<config>");
-        if (gnmi_path_to_xml(h, upd->path, val, OP_MERGE, xmlcb) < 0){
-            free(val); goto done;
-        }
-        cprintf(xmlcb, "</config>");
         free(val);
-        if (clicon_rpc_edit_config(h, "candidate", OP_MERGE,
-                                   cbuf_get(xmlcb)) < 0)
-            goto done;
-        cbuf_free(xmlcb); xmlcb = NULL;
+        if ((ret = gnmi_edit_candidate(h, xmlcb, grpc_status)) < 0)
+            goto discard;
+        if (ret == 0) /* NETCONF error: reason + grpc_status set */
+            goto discard;
         any = 1;
-
         if ((ur = calloc(1, sizeof *ur)) == NULL){
             clixon_err(OE_UNIX, errno, "calloc");
-            goto done;
+            goto discard;
         }
         gnmi__update_result__init(ur);
         ur->path = upd->path;
@@ -978,10 +1184,19 @@ gnmi_set(clixon_handle  h,
         results[ri++] = ur;
     }
 
-    /* Commit all changes at once */
+    /* Commit all edits as one transaction; discard on failure */
     if (any){
-        if (clicon_rpc_commit(h, 0, 0, 0, NULL, NULL) < 0)
+        cbuf_reset(xmlcb);
+        cprintf(xmlcb, "<rpc xmlns=\"%s\" %s><commit/></rpc>",
+                NETCONF_BASE_NAMESPACE, NETCONF_MESSAGE_ID_ATTR);
+        if ((ret = gnmi_rpc_send(h, cbuf_get(xmlcb), "commit", grpc_status)) < 0)
+            goto discard;
+        if (ret == 0){
+            /* NETCONF error returned — reason + grpc_status already set;
+             * discard and surface the error */
+            clicon_rpc_discard_changes(h);
             goto done;
+        }
     }
 
     sresp.timestamp  = (int64_t)time(NULL) * (int64_t)1000000000;
@@ -1012,6 +1227,11 @@ gnmi_set(clixon_handle  h,
     if (buf)
         free(buf);
     return retval;
+ discard:
+    /* An edit-config or allocation failed after some edits were applied;
+     * restore the candidate to its pre-request state before returning error. */
+    clicon_rpc_discard_changes(h);
+    goto done;
 }
 
 /*! Append one gRPC Length-Prefixed-Message frame to a cbuf
@@ -1131,7 +1351,7 @@ gnmi_subscribe(clixon_handle  h,
             xret = NULL;
         }
         if (gnmi_get_one_path(h, sublist->subscription[i]->path,
-                              CONTENT_ALL, &xret) < 0)
+                              CONTENT_ALL, &xret, grpc_status) < 0)
             goto done;
 
         if ((jsoncb = cbuf_new()) == NULL){

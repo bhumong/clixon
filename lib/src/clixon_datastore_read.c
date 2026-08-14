@@ -44,6 +44,7 @@
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <assert.h>
@@ -85,6 +86,7 @@
 #include "clixon_xml_nsctx.h"
 #include "clixon_datastore.h"
 #include "clixon_datastore_read.h"
+#include "banned.h"
 
 #define handle(xh) (assert(text_handle_check(xh)==0),(struct text_handle *)(xh))
 
@@ -390,8 +392,8 @@ text_read_modstate(clixon_handle    h,
 		cxobj* cx_ns;
 		if ((xf2 = xml_dup(xf)) == NULL)
 		    goto done;
-		cx_ns = xml_find(xf2, "namespace");
-		xml_purge(cx_ns);
+		if ((cx_ns = xml_find(xf2, "namespace")) != NULL)
+		    xml_purge(cx_ns);
 		xml_new_body("namespace", xf2, sns);
 		if (xml_addsub(msdiff->md_diff, xf2) < 0)
 		    goto done;
@@ -460,7 +462,6 @@ disable_nacm_on_empty(cxobj     *xt,
     int        len = 0;
     cxobj     *xnacm = NULL;
     cxobj     *x;
-    cxobj     *xb;
     int        ix;
 
     if ((ymod = yang_find(yspec, Y_MODULE, "ietf-netconf-acm")) == NULL)
@@ -478,9 +479,7 @@ disable_nacm_on_empty(cxobj     *xt,
     if (clixon_xml_find_instance_id(xt, yspec, &vec, &len, "/nacm:nacm/nacm:enable-nacm") < 1)
         goto done;
     if (len){
-        if ((xb = xml_body_get(vec[0])) == NULL)
-            goto done;
-        if (xml_value_set(xb, "false") < 0)
+        if (xml_body_set(vec[0], "false") < 0)
             goto done;
     }
     if (vec)
@@ -512,9 +511,28 @@ xmldb_multi_read_applyfn(cxobj *x,
     cbuf                   *cb = NULL;
     char                   *dbfile;
     FILE                   *fp = NULL;
+    int                     i;
+    size_t                  len;
 
     if ((xa = xml_find_type(x, CLIXON_LIB_PREFIX, "link", CX_ATTR)) != NULL &&
         (filename = xml_value(xa)) != NULL){
+        /* Sanity check of filename: end with .xml */
+        len = strlen(filename);
+        if (len >= 4 && strcmp(filename + len - 4, ".xml") == 0){
+        }
+        else{
+            clixon_err(OE_DB, EINVAL, "Invalid datastore link '%s' should end with .xml" , filename);
+            goto done;
+        }
+        /* Sanity check of filename: must be hashed */
+        for (i = 0; i < len-4; i++){
+            if (!(islower(filename[i]) || isdigit(filename[i])))
+                break;
+        }
+        if (i < len-4){
+            clixon_err(OE_DB, EINVAL, "Invalid datastore link '%s' should be a hashed filename", filename);
+            goto done;
+        }
         if ((cb = cbuf_new()) == NULL){
             clixon_err(OE_XML, errno, "cbuf_new");
             goto done;
@@ -1159,7 +1177,8 @@ xmldb_get_copy(clixon_handle h,
  * @retval    -1      Error
  * @note Use of 1 for OK
  * @code
- *   if ((ret = xmldb_get(xh, "running", NULL, "/interfaces/interface[name="eth"]", &xt)) < 0)
+ *   cxobj *xt;
+ *   if ((ret = xmldb_get(h, "running", NULL, "/interfaces/interface[name="eth"]", &xt)) < 0)
  *      err;
  *   if (ret == 0)
  *      err;

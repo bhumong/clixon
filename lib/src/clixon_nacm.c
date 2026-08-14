@@ -78,7 +78,134 @@
 #include "clixon_path.h"
 #include "clixon_xml_vec.h"
 #include "clixon_yang_parse_lib.h"
+#include "clixon_autocli.h"
+#include "clixon_uid.h"
 #include "clixon_nacm.h"
+#include "banned.h"
+
+/*! Augment gvec with NACM groups whose name matches a peer's OS group memberships
+ *
+ * Implements RFC 8341 §3.3.4.5: when enable-external-groups is true, the server
+ * adds the groups reported by the transport layer to the user's group set.
+ * Here "reported by the transport layer" means the OS group memberships of the
+ * peer process, looked up via getgrent().
+ * Only NACM groups not already present in gvec are added.
+ * If the client has requested an explicit group name (cred=none only), only
+ * that group is checked; under exact/except creds explicit groupname is
+ * ignored to prevent privilege escalation.
+ * @param[in]     xnacm    NACM XML tree
+ * @param[in]     nsc      Namespace context for xnacm
+ * @param[in]     cred     NACM credentials mode (none/exact/except)
+ * @param[in]     peername Peer OS username (from socket credentials)
+ * @param[in]     username Authenticated NACM user (from cl:username)
+ * @param[in,out] gvecp    Group node vector; realloc'd if new groups added
+ * @param[in,out] glenp    Number of entries in *gvecp
+ * @retval        0        OK
+ * @retval       -1        Error
+ */
+static int
+nacm_external_groups_add(clixon_handle            h,
+                         cxobj                   *xnacm,
+                         cvec                    *nsc,
+                         const char              *username,
+                         cxobj                 ***gvecp,
+                         size_t                  *glenp)
+{
+    int                     retval = -1;
+    enum nacm_credentials_t cred;
+    const char             *peername;
+    char                   *extgroups;
+    char                   *groupname; /* Explicit groupname requested by client */
+    char                  **osgroups = NULL;
+    int                     nosgroups = 0;
+    cxobj                  *xgroup;
+    char                   *gname;
+    cxobj                 **gvec2 = NULL;
+    size_t                  glen2;
+    int                     i;
+    int                     j;
+    int                     found;
+
+    if ((peername = clixon_nacm_peername_get(h)) == NULL)
+        goto ok;
+    cred = clicon_nacm_credentials(h);
+    /* External groups are the transport-reported groups of the AUTHENTICATED
+     * user. For proxy transports under 'except' creds (RESTCONF, proxyusers,
+     * root) the peer is the proxy daemon, not the end user, so its OS groups
+     * must NOT be granted to the proxied user (NACM privilege escalation,
+     * RFC 8341 3.2.2). Under 'none' creds the peer's groups are intentionally
+     * usable for a masqueraded username (test/insecure mode). Under 'exact'
+     * peer==user always. So skip only when creds enforce identity yet peer
+     * differs from the claimed user. */
+    if (cred != NC_NONE && (username == NULL || strcmp(peername, username) != 0))
+        goto ok;
+    extgroups = xml_find_body(xnacm, "enable-external-groups");
+    if (extgroups == NULL || strcmp(extgroups, "true") != 0)
+        goto ok;
+    if (cred == NC_NONE && (groupname = clixon_groupname_get(h)) != NULL){
+        nosgroups = 1;
+        if ((osgroups = malloc(sizeof(char *))) == NULL){
+            clixon_err(OE_UNIX, errno, "malloc");
+            goto done;
+        }
+        if ((osgroups[0] = strdup(groupname)) == NULL){
+            clixon_err(OE_UNIX, errno, "strdup");
+            goto done;
+        }
+    }
+    else if (user2groups(peername, &osgroups, &nosgroups) < 0)
+        goto done;
+    /* For each OS group, find matching NACM group node not already in gvec */
+    glen2 = *glenp;
+    gvec2 = *gvecp;
+    for (i = 0; i < nosgroups; i++){
+        if (osgroups[i] == NULL)
+            continue;
+        xgroup = xpath_first(xnacm, nsc, "groups/group[name='%s']", osgroups[i]);
+        if (xgroup == NULL)
+            continue;
+        /* Skip if already in gvec (static user-name match) */
+        found = 0;
+        for (j = 0; j < (int)glen2; j++){
+            if (gvec2[j] == xgroup){
+                found = 1;
+                break;
+            }
+        }
+        if (found)
+            continue;
+        /* Check by name to avoid duplicates from multiple OS groups */
+        gname = xml_find_body(xgroup, "name");
+        for (j = 0; j < (int)glen2; j++){
+            if (strcmp(xml_find_body(gvec2[j], "name")?:"", gname?:"") == 0){
+                found = 1;
+                break;
+            }
+        }
+        if (found)
+            continue;
+        clixon_debug(CLIXON_DBG_NACM, "external group match: peer %s in OS group %s",
+                     peername, osgroups[i]);
+        if ((gvec2 = realloc(gvec2, (glen2 + 1) * sizeof(cxobj *))) == NULL){
+            clixon_err(OE_UNIX, errno, "realloc");
+            goto done;
+        }
+        gvec2[glen2++] = xgroup;
+    }
+    *gvecp = gvec2;
+    *glenp = glen2;
+    gvec2 = NULL;
+ ok:
+    retval = 0;
+ done:
+    if (osgroups){
+        for (i = 0; i < nosgroups; i++)
+            if (osgroups[i])
+                free(osgroups[i]);
+        free(osgroups);
+    }
+    return retval;
+}
 
 /*! Add user to list of NACM proxyusers that may represent other users
  *
@@ -235,6 +362,7 @@ nacm_rule_rpc(const char *rpc,
 
 /*! Process nacm incoming RPC message validation steps
  *
+ * @param[in]  h        Clixon handle
  * @param[in]  rpc      rpc name
  * @param[in]  module   Yang module name
  * @param[in]  username User name of requestor
@@ -248,11 +376,12 @@ nacm_rule_rpc(const char *rpc,
  * @see nacm_datanode_read
  */
 int
-nacm_rpc(const char *rpc,
-         const char *module,
-         const char *username,
-         cxobj      *xnacm,
-         cbuf       *cbret)
+nacm_rpc(clixon_handle h,
+         const char   *rpc,
+         const char   *module,
+         const char   *username,
+         cxobj        *xnacm,
+         cbuf         *cbret)
 {
     int     retval = -1;
     cxobj  *xrule;
@@ -289,6 +418,9 @@ nacm_rpc(const char *rpc,
     }
     /* User's group */
     if (xpath_vec(xnacm, nsc, "groups/group[user-name='%s']", &gvec, &glen, username) < 0)
+        goto done;
+    /* Augment with OS groups from transport layer */
+    if (nacm_external_groups_add(h, xnacm, nsc, username, &gvec, &glen) < 0)
         goto done;
     /* 5. If no groups are found, continue with step 10. */
     if (glen == 0)
@@ -824,6 +956,9 @@ nacm_datanode_write(clixon_handle    h,
     /* User's group */
     if (xpath_vec(xnacm, nsc, "groups/group[user-name='%s']", &gvec, &glen, username) < 0)
         goto done;
+    /* Augment with OS groups from transport layer */
+    if (nacm_external_groups_add(h, xnacm, nsc, username, &gvec, &glen) < 0)
+        goto done;
     /* 4. If no groups are found, continue with step 9. */
     if (glen == 0)
         goto step9;
@@ -1121,6 +1256,9 @@ nacm_datanode_read1(clixon_handle h,
     /* User's group */
     if (xpath_vec(xnacm, nsc, "groups/group[user-name='%s']", &gvec, &glen, username) < 0)
         goto done;
+    /* Augment with OS groups from transport layer */
+    if (nacm_external_groups_add(h, xnacm, nsc, username, &gvec, &glen) < 0)
+        goto done;
     /* 4. If no groups are found (glen=0), continue and check read-default 
           in step 11. */
     /* 5. Process all rule-list entries, in the order they appear in the
@@ -1258,7 +1396,7 @@ nacm_access_check(clixon_handle h,
     enabled = xml_body(x);
     if (strcmp(enabled, "true") != 0)
         goto permit;
-    recovery_user=clicon_nacm_recovery_user(h);
+    recovery_user = clicon_nacm_recovery_user(h);
     /* 2.   If the requesting session is identified as a recovery session,
      * then the protocol operation is permitted. 
      */
@@ -1574,11 +1712,10 @@ nacm_init(clixon_handle h)
     return retval;
 }
 
-/*! Normalize a NACM path by stripping namespace prefixes
+/*! Normalize a NACM path by stripping namespace prefixes and key predicates
  *
- * /oc-sys:contexts/oc-sys:context -> /contexts/context
- * Paths with predicates are left unchanged (caller should detect and skip)
- * @param[in]  path0  Input path with optional namespace prefixes
+ * /oc-sys:contexts/oc-sys:context[oc-sys:name='x'] -> /contexts/context
+ * @param[in]  path0  Input path with optional namespace prefixes and predicates
  * @retval     str    Malloced normalized path string, caller frees
  * @retval     NULL   Error
  */
@@ -1590,6 +1727,8 @@ nacm_path_normalize(const char *path0)
     char       *str;
     char       *tok;
     char       *colon;
+    char       *bracket;
+    char       *name_part;
     char       *retval = NULL;
 
     if ((cb = cbuf_new()) == NULL){
@@ -1605,7 +1744,11 @@ nacm_path_normalize(const char *path0)
         if (*tok == '\0')
             continue;
         colon = strchr(tok, ':');
-        cprintf(cb, "/%s", colon ? colon + 1 : tok);
+        name_part = colon ? colon + 1 : tok;
+        /* Strip key predicate if present: context[name='x'] -> context */
+        if ((bracket = strchr(name_part, '[')) != NULL)
+            *bracket = '\0';
+        cprintf(cb, "/%s", name_part);
     }
     retval = strdup(cbuf_get(cb));
     if (retval == NULL)
@@ -1618,12 +1761,105 @@ nacm_path_normalize(const char *path0)
     return retval;
 }
 
+/*! Strip compress-rule-suppressed YANG nodes from a normalized path
+ *
+ * Walk each segment of the already-normalised path (no prefixes, no key
+ * predicates) against the YANG schema tree.  Any segment whose YANG node
+ * is "compressed away" by an autocli compress rule is omitted from the
+ * output.  Segments that are not found in the YANG tree are kept as-is so
+ * that the caller still gets a useful (if imperfect) path.
+ *
+ * Example:
+ *   YANG:  container interfaces { list interface { ... } }
+ *   Rule:  compress container whose only child is list
+ *   Input:  /interfaces/interface
+ *   Output: /interface
+ *
+ * @param[in]  h       Clixon handle (for autocli_compress access)
+ * @param[in]  path    Normalized path (no ns prefixes, no predicates)
+ * @param[in]  yspec   YANG specification top-level node
+ * @retval     str     Malloced path with compressed segments removed, caller frees
+ * @retval     NULL    Error
+ */
+static char *
+nacm_path_compress_apply(clixon_handle h,
+                         const char   *path,
+                         yang_stmt    *yspec)
+{
+    cbuf       *cb     = NULL;
+    char       *pcopy  = NULL;
+    char       *str;
+    char       *tok;
+    yang_stmt  *ycur   = yspec;
+    char       *retval = NULL;
+    int         compress;
+    yang_stmt  *ynext;
+    int         ix;
+    yang_stmt  *ymod;
+
+    if ((cb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        goto done;
+    }
+    if ((pcopy = strdup(path)) == NULL){
+        clixon_err(OE_UNIX, errno, "strdup");
+        goto done;
+    }
+    str = pcopy;
+    while ((tok = strsep(&str, "/")) != NULL){
+        if (*tok == '\0')
+            continue;
+        /* Find this segment in the current YANG context.
+         * For the top-level (yspec), search across all modules. */
+        ynext = NULL;
+        if (yang_keyword_get(ycur) == Y_SPEC){
+            /* yspec level: search all modules */
+            ix = 0;
+            while ((ymod = yn_iter(ycur, &ix)) != NULL){
+                if (yang_keyword_get(ymod) != Y_MODULE &&
+                    yang_keyword_get(ymod) != Y_SUBMODULE)
+                    continue;
+                if ((ynext = yang_find_datanode(ymod, tok)) != NULL)
+                    break;
+            }
+        }
+        else {
+            ynext = yang_find_datanode(ycur, tok);
+        }
+        if (ynext == NULL){
+            /* Node not found in YANG — keep the segment and stay at same level */
+            cprintf(cb, "/%s", tok);
+            continue;
+        }
+        compress = 0;
+        if (autocli_compress(h, ynext, &compress) < 0)
+            goto done;
+        if (!compress)
+            cprintf(cb, "/%s", tok);
+        ycur = ynext;
+    }
+    if ((retval = strdup(cbuf_get(cb))) == NULL){
+        clixon_err(OE_UNIX, errno, "strdup");
+        goto done;
+    }
+ done:
+    if (pcopy)
+        free(pcopy);
+    if (cb)
+        cbuf_free(cb);
+    return retval;
+}
+
 /*! Build autocli NACM filter for a user from the NACM XML tree
  *
- * Collects simple NACM read rules (no predicates) for the user's groups.
- * Rules with XPath predicates (e.g. /x/y[key='v']) are skipped since they
- * cannot be mapped to YANG schema nodes.
+ * Collects NACM read rules for the user's groups.
+ * Rule paths are normalized: namespace prefixes and key predicates are stripped
+ * so that e.g. /ex:devices/ex:device[ex:name='x'] is treated as /devices/device.
+ * Autocli compress rules are then applied so that compressed YANG containers
+ * are removed from the path, matching the CLI node paths that nacm_build_yang_path
+ * produces (which walks the CLIgen tree where compressed nodes are absent).
  *
+ * @param[in]  h         Clixon handle (for autocli compress rules)
  * @param[in]  username  User name
  * @param[in]  xnacm     Top-level nacm XML element (may be NULL if NACM disabled)
  * @param[out] nafp      Filter struct (NULL if NACM disabled or no rules), caller frees
@@ -1632,7 +1868,8 @@ nacm_path_normalize(const char *path0)
  * @see nacm_autocli_filter_free
  */
 int
-nacm_autocli_filter_build(const char             *username,
+nacm_autocli_filter_build(clixon_handle           h,
+                          const char             *username,
                           cxobj                  *xnacm,
                           nacm_autocli_filter_t **nafp)
 {
@@ -1651,12 +1888,14 @@ nacm_autocli_filter_build(const char             *username,
     cxobj                 *xrule;
     char                  *path0;
     char                  *path = NULL;
+    char                  *pathc = NULL;
     char                  *action;
     char                  *access_operations;
     int                    i;
     int                    j;
     int                    k;
     char                  *gname;
+    yang_stmt             *yspec;
 
     *nafp = NULL;
     if (xnacm == NULL || username == NULL)
@@ -1685,6 +1924,9 @@ nacm_autocli_filter_build(const char             *username,
 
     /* 1. Find user's groups */
     if (xpath_vec(xnacm, nsc, "groups/group[user-name='%s']", &gvec, &glen, username) < 0)
+        goto done;
+    /* Augment with OS groups from transport layer */
+    if (nacm_external_groups_add(h, xnacm, nsc, username, &gvec, &glen) < 0)
         goto done;
 
     /* 2. Find all rule-lists */
@@ -1734,15 +1976,25 @@ nacm_autocli_filter_build(const char             *username,
             }
             if (xml_find_body(xrule, "rpc-name") || xml_find_body(xrule, "notification-name"))
                 continue;
-            /* Skip paths with predicates - cannot map to YANG schema */
-            if (strchr(path0, '[') != NULL)
-                continue;
-            /* Normalize path: strip namespace prefixes */
+            /* Normalize path: strip namespace prefixes and key predicates */
             if (path)
                 free(path);
             path = NULL;
             if ((path = nacm_path_normalize(path0)) == NULL)
                 goto done;
+            /* Apply autocli compress rules: remove segments whose YANG nodes are
+             * compressed away, so the filter path matches what nacm_build_yang_path
+             * produces from the CLIgen tree (which lacks compressed nodes). */
+            if (pathc)
+                free(pathc);
+            pathc = NULL;
+            yspec = clicon_dbspec_yang(h);
+            if (yspec != NULL){
+                if ((pathc = nacm_path_compress_apply(h, path, yspec)) == NULL)
+                    goto done;
+            }
+            else
+                pathc = path; /* no yspec: use normalized path as-is */
             /* Add to the appropriate set:
              * deny_default=0: collect deny paths
              * deny_default=1: collect permit paths */
@@ -1753,7 +2005,7 @@ nacm_autocli_filter_build(const char             *username,
                     clixon_err(OE_UNIX, errno, "cvec_add");
                     goto done;
                 }
-                if (cv_string_set(cv, path) == NULL){
+                if (cv_string_set(cv, pathc) == NULL){
                     clixon_err(OE_UNIX, errno, "cv_string_set");
                     goto done;
                 }
@@ -1767,6 +2019,8 @@ nacm_autocli_filter_build(const char             *username,
  done:
     if (path)
         free(path);
+    if (pathc && pathc != path)
+        free(pathc);
     if (gvec)
         free(gvec);
     if (rlistvec)

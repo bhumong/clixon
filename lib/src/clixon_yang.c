@@ -91,6 +91,7 @@
 #include "clixon_yang_type.h"
 #include "clixon_yang_schema_mount.h"
 #include "clixon_yang_internal.h" /* internal included by this file only, not API */
+#include "banned.h"
 
 /* Context for matching an import by module name and capturing its prefix */
 struct import_mod_ctx {
@@ -2748,6 +2749,10 @@ yang_deviation(yang_stmt *ys,
             while ((yc = yn_iter(yd, &inext)) != NULL) {
                 /* If a property can only appear once, the property MUST NOT exist in the target node. */
                 kw = yang_keyword_get(yc);
+                /* Extensions (unknown statements) annotate the deviate, they are not
+                 * target properties, see RFC 7950 Sec 6.3.1 */
+                if (kw == Y_UNKNOWN)
+                    continue;
                 if (yang_find(ytarget, kw, NULL) != NULL){
                     if (yang_cardinality_interval(h,
                                                   yang_keyword_get(ytarget),
@@ -2785,6 +2790,10 @@ yang_deviation(yang_stmt *ys,
             while ((yc = yn_iter(yd, &inext)) != NULL) {
                 /* The properties to replace MUST exist in the target node.*/
                 kw = yang_keyword_get(yc);
+                /* Extensions (unknown statements) annotate the deviate, they are not
+                 * target properties, see RFC 7950 Sec 6.3.1 */
+                if (kw == Y_UNKNOWN)
+                    continue;
                 ytc = yang_find(ytarget, kw, NULL);
                 switch (kw){
                 case Y_CONFIG: /* special case: implicit default is config true */
@@ -2832,6 +2841,10 @@ yang_deviation(yang_stmt *ys,
                  * argument's string MUST be equal to the corresponding keyword's argument string in the
                  * target node. */
                 kw = yang_keyword_get(yc);
+                /* Extensions (unknown statements) annotate the deviate, they are not
+                 * target properties, see RFC 7950 Sec 6.3.1 */
+                if (kw == Y_UNKNOWN)
+                    continue;
                 if ((ytc = yang_find(ytarget, kw, NULL)) == NULL){
                     clixon_err(OE_YANG, 0, "deviation %s: \"%s %s\" replaced but node does not exist in target %s",
                                nodeid,
@@ -4461,6 +4474,7 @@ yang_arg2cvec(yang_stmt  *ys,
         cv_type_set(cv, CGV_STRING);
         if ((cv_string_set(cv, vec[i])) == NULL){
             clixon_err(OE_YANG, errno, "cv_string_set");
+            cvec_free(cvv);
             cvv = NULL;
             goto done;
         }

@@ -55,6 +55,7 @@
 #include "clixon_yang.h"
 #include "clixon_xml.h"
 #include "clixon_err.h"
+#include "banned.h"
 
 /*! Split string into a vector based on character delimiters. Using malloc
  *
@@ -95,7 +96,7 @@ clixon_strsep1(const char *string,
     int    i;
     size_t siz;
     const char *s;
-    char  *d;
+    const char *d;
 
     if ((s = string)==NULL)
         goto done;
@@ -112,7 +113,7 @@ clixon_strsep1(const char *string,
     }
     memset(vec, 0, siz);
     ptr = (char*)vec + (nvec+1)* sizeof(char*); /* this is where ptr starts */
-    strcpy(ptr, string);
+    memcpy(ptr, string, strlen(string)+1);
     i = 0;
     while ((p = strsep(&ptr, delim)) != NULL)
         vec[i++] = p;
@@ -152,8 +153,9 @@ clixon_strsep2(char       *str,
 
     s1 = str;
     while ((s1 = strstr(s1, delim1)) != NULL){
-        if ((s2 = strstr(s1+strlen(delim1), delim2)) != NULL)
-            nr += 2;
+        if ((s2 = strstr(s1+strlen(delim1), delim2)) == NULL)
+            break; /* no closing delimiter: no more complete pairs possible */
+        nr += 2;
         s1 = s2 + strlen(delim2);
     }
     /* alloc vector and append copy of string */
@@ -164,17 +166,17 @@ clixon_strsep2(char       *str,
     }
     memset(vec, 0, sz);
     ptr = (char*)vec + (nr+1)* sizeof(char*); /* this is where ptr starts */
-    strcpy(ptr, str);
+    memcpy(ptr, str, strlen(str)+1);
     i = 0;
     s1 = ptr;
     vec[i++] = ptr;
     while ((s1 = strstr(s1, delim1)) != NULL){
-        if ((s2 = strstr(s1+strlen(delim1), delim2)) != NULL){
-            *s1 = '\0';
-            *s2 = '\0';
-            vec[i++] = s1 + strlen(delim1);
-            vec[i++] = s2 + strlen(delim2);
-        }
+        if ((s2 = strstr(s1+strlen(delim1), delim2)) == NULL)
+            break; /* no closing delimiter: no more complete pairs possible */
+        *s1 = '\0';
+        *s2 = '\0';
+        vec[i++] = s1 + strlen(delim1);
+        vec[i++] = s2 + strlen(delim2);
         s1 = s2 + strlen(delim2);
     }
     *vcp = vec;
@@ -211,7 +213,7 @@ clixon_strsep3(const char *string,
     int    i;
     size_t siz;
     const char *s;
-    char  *d;
+    const char *d;
     int    prev;
 
     if ((s = string)==NULL)
@@ -235,7 +237,7 @@ clixon_strsep3(const char *string,
     }
     memset(vec, 0, siz);
     ptr = (char*)vec + (nvec+1)* sizeof(char*); /* this is where ptr starts */
-    strcpy(ptr, string);
+    memcpy(ptr, string, strlen(string)+1);
     i = 0;
     while ((p = strsep(&ptr, delim)) != NULL){
         if (*p != '\0')
@@ -343,7 +345,7 @@ clixon_strsplit(const char *string,
                 char      **suffix)
 {
     int   retval = -1;
-    char *str;
+    const char *str;
 
     if ((str = strchr(string, delim)) == NULL){
         if (suffix && (*suffix = strdup(string)) == NULL){
@@ -1267,6 +1269,33 @@ clixon_str_subst(char *str,
     return retval;
 }
 
+/*! Replacer for non-posix memmem() function for binary strstr
+ *
+ * @param[in]  haystack  Input string
+ * @param[in]  hlen      Length of haystack
+ * @param[in]  needle    Input string to search for
+ * @param[in]  nlen      Length of needle
+ * @retval     ptr       Pointer to first occurrence of needle in haystack
+ * @retval     NULL      Not found
+ */
+void *
+my_memmem(const void *haystack,
+          size_t      hlen,
+          const void *needle,
+          size_t      nlen)
+{
+    const unsigned char *h = haystack;
+    const unsigned char *n = needle;
+    size_t i;
+
+    if (nlen == 0) return (void *)h;
+    if (nlen > hlen) return NULL;
+    for (i = 0; i <= hlen - nlen; i++)
+        if (memcmp(h + i, n, nlen) == 0)
+            return (void *)(h + i);
+    return NULL;
+}
+
 /*! strndup() for systems without it, such as xBSD
  */
 #ifndef HAVE_STRNDUP
@@ -1290,48 +1319,3 @@ clicon_strndup(const char *str,
   return new;
 }
 #endif /* ! HAVE_STRNDUP */
-
-/*
- * Turn this on for uni-test programs
- * Usage: clixon_string join
- * Example compile:
- gcc -g -o clixon_string -I. -I../clixon ./clixon_string.c -lclixon -lcligen
- * Example run:
-*/
-#if 0 /* Test program */
-
-static int
-usage(char *argv0)
-{
-    fprintf(stderr, "usage:%s <string>\n", argv0);
-    exit(0);
-}
-
-int
-main(int argc, char **argv)
-{
-    int nvec;
-    char **vec;
-    char *str0;
-    char *str1;
-    int   i;
-
-    if (argc != 2){
-        usage(argv[0]);
-        return 0;
-    }
-    str0 = argv[1];
-    if ((vec = clixon_strsep3(str0, " \t", &nvec)) == NULL)
-        return -1;
-    fprintf(stderr, "nvec: %d\n", nvec);
-    for (i=0; i<nvec+1; i++)
-        fprintf(stderr, "vec[%d]: %s\n", i, vec[i]);
-    if ((str1 = clicon_strjoin(nvec, vec, " ")) == NULL)
-        return -1;
-    fprintf(stderr, "join: %s\n", str1);
-    free(vec);
-    free(str1);
-    return 0;
-}
-
-#endif /* Test program */

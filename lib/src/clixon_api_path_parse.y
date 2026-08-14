@@ -59,11 +59,11 @@
 
 %token <string> IDENTIFIER
 %token <string> STRING
-%token <string> SLASH
-%token <string> COLON
-%token <string> COMMA
-%token <string> EQUAL
-%token <string> X_EOF
+%token SLASH
+%token COLON
+%token COMMA
+%token EQUAL
+%token X_EOF
 
 %type  <stack>  list
 %type  <stack>  element
@@ -73,8 +73,20 @@
 %type  <stack>  key_values
 %type  <stack>  key_value
 
-%lex-param     {void *_ay} /* Add this argument to parse() and lex() function */
-%parse-param   {void *_ay}
+%destructor { clixon_path_free($$); } <stack>
+%destructor { free($$); } <string>
+
+%lex-param     {yyscan_t yyscanner}    /* passed to yylex() */
+%parse-param   {void *_ay}             /* passed to yyparse() and yyerror() */
+%parse-param   {yyscan_t yyscanner}    /* passed to yyparse(), yylex(), and yyerror() */
+%define api.pure full                  /* make yylval a local, not a global */
+
+%code requires {
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+}
 
 %{
 /* Here starts user C-code */
@@ -82,7 +94,7 @@
 /* typecast macro */
 #define _AY ((clixon_api_path_yacc *)_ay)
 
-#define _YYERROR(msg) {clixon_err(OE_XML, 0, "YYERROR %s '%s' %d", (msg), clixon_api_path_parsetext, _AY->ay_linenum); YYERROR;}
+#define _YYERROR(msg) {clixon_err(OE_XML, 0, "YYERROR %s '%s' %d", (msg), clixon_api_path_parseget_text(yyscanner), _AY->ay_linenum); YYERROR;}
 
 /* add _yy to error parameters */
 #define YY_(msgid) msgid
@@ -114,6 +126,7 @@
 #include "clixon_debug.h"
 #include "clixon_path.h"
 #include "clixon_api_path_parse.h"
+#include "banned.h"
 
 /* Best debugging is to enable PARSE_DEBUG below and add -d to the LEX compile statement in the Makefile
  * And then run the testcase with -D 1
@@ -132,13 +145,14 @@
  */
 void
 clixon_api_path_parseerror(void *_ay,
-                           char *s)
+                           yyscan_t yyscanner,
+                           char       *s)
 {
     clixon_err(OE_XML, 0, "%s on line %d: %s at or before: '%s'",
                _AY->ay_name,
                _AY->ay_linenum,
                s,
-               clixon_api_path_parsetext);
+               clixon_api_path_parseget_text(yyscanner));
     return;
 }
 
@@ -191,6 +205,7 @@ path_new(char *module_name,
         goto done;
     }
     memset(cp, 0, sizeof(*cp));
+    INITQ(cp);
     if (module_name)
         if ((cp->cp_prefix = strdup(module_name)) == NULL){
             clixon_err(OE_UNIX, errno, "strdup");
@@ -226,6 +241,7 @@ keyval_add(cvec   *cvv,
     }
     if (cvec_append_var(cvv, cv) == NULL){
         clixon_err(OE_UNIX, errno, "cvec_append_var");
+        cvec_free(cvv);
         cvv = NULL;
         goto done;
     }

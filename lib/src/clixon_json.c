@@ -78,6 +78,7 @@
 #include "clixon_netconf_lib.h"
 #include "clixon_json.h"
 #include "clixon_json_parse.h"
+#include "banned.h"
 
 /* Let xml2json_cbuf_vec() return json array: [a,b].
    ALternative is to create a pseudo-object and return that: {top:{a,b}}
@@ -123,6 +124,11 @@ child_type(cxobj *x)
     clen = xml_child_nr_notype(x, CX_ATTR);
     if (xml_type(x) != CX_ELMNT)
         return -1; /* n/a */
+#ifdef OPTMEM_XML_BODY
+    /* In inline mode, body is stored in x_bodyval (no CX_BODY child exists) */
+    if (clen == 0 && xml_flag(x, XML_FLAG_BODY))
+        return BODY_CHILD;
+#endif
     if (clen == 0)
         return NULL_CHILD;
     if (clen > 1)
@@ -311,7 +317,6 @@ json2xml_decode_identityref(cxobj     *x,
     int        retval = -1;
     char      *ns;
     char      *body;
-    cxobj     *xb;
     char      *prefix = NULL;
     char      *id = NULL;
     yang_stmt *ymod;
@@ -322,9 +327,8 @@ json2xml_decode_identityref(cxobj     *x,
 
     clixon_debug(CLIXON_DBG_DEFAULT, "");
     yspec = ys_spec(y);
-    if ((xb = xml_body_get(x)) == NULL)
+    if ((body = xml_body(x)) == NULL)
         goto ok;
-    body = xml_value(xb);
     if (nodeid_split(body, &prefix, &id) < 0)
         goto done;
     /* prefix is a module name -> find module */
@@ -366,7 +370,7 @@ json2xml_decode_identityref(cxobj     *x,
             else
                 cprintf(cbv, "%s", id);
 
-            if (xml_value_set(xb, cbuf_get(cbv)) < 0)
+            if (xml_body_set(x, cbuf_get(cbv)) < 0)
                 goto done;
         }
         else{
@@ -989,6 +993,13 @@ xml2json1_cbuf(cbuf                   *cb,
             }
         }
     }
+#ifdef OPTMEM_XML_BODY
+    /* In inline mode no CX_BODY child exists; output body value directly */
+    if (childt == BODY_CHILD && xml_flag(x, XML_FLAG_BODY)){
+        if (xml2json_encode_leafs(x, x, xml_spec(x), cb) < 0)
+            goto done;
+    }
+#endif
     if (cbuf_len(metacbc)){
         cprintf(cb, "%s", cbuf_get(metacbc));
     }
@@ -1493,7 +1504,7 @@ _json_parse(clixon_handle h,
         goto done;
     if (json_parse_init(&jy) < 0)
         goto done;
-    if (clixon_json_parseparse(&jy) != 0) { /* yacc returns 1 on error */
+    if (clixon_json_parseparse(&jy, jy.jy_scanner) != 0) { /* yacc returns 1 on error */
         clixon_log(NULL, LOG_NOTICE, "JSON error: line %d", jy.jy_linenum);
         if (clixon_err_category() == 0)
             clixon_err(OE_JSON, 0, "JSON parser error with no error code (should not happen)");

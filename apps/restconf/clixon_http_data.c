@@ -66,6 +66,7 @@
 #include "restconf_api.h"
 #include "restconf_err.h"
 #include "clixon_http_data.h"
+#include "banned.h"
 
 /* File extension <-> HTTP Content media mapping
  * File extensions (on the left) MIME types (to the right) 
@@ -158,6 +159,30 @@ api_http_data_err(clixon_handle  h,
     return retval;
 }
 
+/*! Check that canonical path is contained within canonical prefix
+ *
+ * Requires a path-separator (or string-end) boundary right after the prefix to
+ * avoid prefix-confusion, eg prefix "/var/www" must not match "/var/www-secret".
+ * @param[in]  prefix  Canonical prefix (from realpath)
+ * @param[in]  path    Canonical path to test (from realpath)
+ * @retval     1       path is within prefix
+ * @retval     0       path is outside prefix
+ */
+static int
+path_within_prefix(const char *prefix,
+                   const char *path)
+{
+    size_t plen = strlen(prefix);
+
+    if (strncmp(prefix, path, plen) != 0)
+        return 0;
+    /* Boundary must be end-of-string or '/'. If prefix already ends in '/'
+     * (eg root "/"), the boundary is satisfied. */
+    if (prefix[plen-1] != '/' && path[plen] != '\0' && path[plen] != '/')
+        return 0;
+    return 1;
+}
+
 /*! Check validity of path, may only be regular dir or file
  *
  * No .., soft link, ~, etc
@@ -185,9 +210,17 @@ http_data_check_file_path(clixon_handle h,
     int         i;
     int         code = 0;
     FILE       *f;
+    char        resolved[PATH_MAX];
+    char        resolved_prefix[PATH_MAX];
 
     if (prefix == NULL || cbpath == NULL || fp == NULL){
         clixon_err(OE_UNIX, EINVAL, "prefix, cbpath0 or fp is NULL");
+        goto done;
+    }
+    /* Canonicalize the prefix once so the later comparison works even if
+     * prefix itself contains symlinks or non-canonical components */
+    if (realpath(prefix, resolved_prefix) == NULL){
+        clixon_err(OE_UNIX, errno, "realpath(%s)", prefix);
         goto done;
     }
     p = cbuf_get(cbpath);
@@ -217,15 +250,23 @@ http_data_check_file_path(clixon_handle h,
             code = 403;
             goto invalid;
         }
-        else if (p[i] == '.' && i>strlen(prefix) && p[i-1] == '.'){
-            clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s): .. not allowed in file path", p);
-            code = 403;
-            goto invalid;
-        }
+    }
+    /* Canonicalize the full path and verify it still resides under the
+     * canonical prefix. This catches path traversal via symlinks pointing
+     * outside the prefix directory. */
+    if (realpath(p, resolved) == NULL){
+        clixon_debug(CLIXON_DBG_RESTCONF, "Error realpath(%s): %s", p, strerror(errno));
+        code = 404;
+        goto invalid;
+    }
+    if (!path_within_prefix(resolved_prefix, resolved)){
+        clixon_debug(CLIXON_DBG_RESTCONF, "Error: resolved path %s escapes prefix %s", resolved, resolved_prefix);
+        code = 403;
+        goto invalid;
     }
     /* Resulting file (ensure not soft link) */
-    if (lstat(p, &fstat) < 0){
-        clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s):%s", p, strerror(errno));
+    if (lstat(resolved, &fstat) < 0){
+        clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s):%s", resolved, strerror(errno));
         code = 404;
         goto invalid;
     }
@@ -235,21 +276,31 @@ http_data_check_file_path(clixon_handle h,
         cprintf(cbpath, "/%s", HTTP_DATA_INTERNAL_REDIRECT);
         p = cbuf_get(cbpath);
         clixon_debug(CLIXON_DBG_RESTCONF, "internal redirect: %s", p);
-        if (lstat(p, &fstat) < 0){
-            clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s):%s", p, strerror(errno));
+        if (realpath(p, resolved) == NULL){
+            clixon_debug(CLIXON_DBG_RESTCONF, "Error realpath(%s): %s", p, strerror(errno));
+            code = 404;
+            goto invalid;
+        }
+        if (!path_within_prefix(resolved_prefix, resolved)){
+            clixon_debug(CLIXON_DBG_RESTCONF, "Error: redirect path %s escapes prefix %s", resolved, resolved_prefix);
+            code = 403;
+            goto invalid;
+        }
+        if (lstat(resolved, &fstat) < 0){
+            clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s):%s", resolved, strerror(errno));
             code = 404;
             goto invalid;
         }
     }
 #endif
     if (!S_ISREG(fstat.st_mode)){
-        clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s): Not regular file", p);
+        clixon_debug(CLIXON_DBG_RESTCONF, "Error lstat(%s): Not regular file", resolved);
         code = 403;
         goto invalid;
     }
     *fsz = fstat.st_size;
-    if ((f = fopen(p, "rb")) == NULL){
-        clixon_debug(CLIXON_DBG_RESTCONF, "Error fopen(%s) %s", p, strerror(errno));
+    if ((f = fopen(resolved, "rb")) == NULL){
+        clixon_debug(CLIXON_DBG_RESTCONF, "Error fopen(%s) %s", resolved, strerror(errno));
         code = 403;
         goto invalid;
     }

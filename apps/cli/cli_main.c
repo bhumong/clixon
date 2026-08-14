@@ -69,9 +69,10 @@
 #include "cli_generate.h"
 #include "cli_common.h"
 #include "cli_handle.h"
+#include "banned.h"
 
 /* Command line options to be passed to getopt(3) */
-#define CLI_OPTS "+hVD:f:E:l:C:F:1sa:u:d:m:qp:GLy:c:U:o:"
+#define CLI_OPTS "+hVD:f:E:l:C:F:1sa:u:d:m:qp:GLy:c:U:g:o:"
 
 static char *_restarg = NULL; /* what remains after options XXX just to avoid mem-leakage, try to fix wo global var */
 
@@ -102,7 +103,7 @@ cli_history_load(clixon_handle h)
         goto done;
     if ((filename = clicon_option_str(h,"CLICON_CLI_HIST_FILE")) == NULL)
         goto ok; /* ignore */
-    if ((ret = wordexp(filename, &result, 0)) != 0){
+    if ((ret = wordexp(filename, &result, WRDE_NOCMD)) != 0){
         clixon_err(OE_UNIX, errno, "wordexp(%s) %d", filename, ret);
         goto done;
     }
@@ -138,11 +139,12 @@ cli_history_save(clixon_handle h)
     char     *filename;
     FILE     *f = NULL;
     wordexp_t result = {0,}; /* for tilde expansion */
+    int       ret;
 
     if ((filename = clicon_option_str(h, "CLICON_CLI_HIST_FILE")) == NULL)
         goto ok; /* ignore */
-    if (wordexp(filename, &result, 0) < 0){
-        clixon_err(OE_UNIX, errno, "wordexp");
+    if ((ret = wordexp(filename, &result, WRDE_NOCMD)) != 0){
+        clixon_err(OE_UNIX, errno, "wordexp(%s) %d", filename, ret);
         goto done;
     }
     if ((f = fopen(result.we_wordv[0], "w+")) == NULL){
@@ -392,7 +394,8 @@ usage(clixon_handle h,
             "\t-L \t\tDebug print dynamic CLI syntax including completions and expansions\n"
             "\t-y <file>\tOverride yang spec file (dont include .yang suffix)\n"
             "\t-c <file>\tSpecify cli spec file.\n"
-            "\t-U <user>\tOver-ride unix user with a pseudo user for NACM.\n"
+            "\t-U <user>\tOverride unix user with a masquerading user for NACM mode NONE and expect.\n"
+            "\t-g <group>\tOverride unix groups with a masquerading group for NACM mode NONE.\n"
             "\t-o \"<option>=<value>\"\tGive configuration option overriding config file (see clixon-config.yang)\n",
             argv0,
             plgdir ? plgdir : "none"
@@ -433,6 +436,7 @@ main(int    argc,
     enum format_enum config_dump_format = FORMAT_XML;
     int            print_version = 0;
     int32_t        d;
+    int            enable;
 
     /* Defaults */
     once = 0;
@@ -605,8 +609,12 @@ main(int    argc,
             if (clicon_option_add(h, "CLICON_CLISPEC_FILE", optarg) < 0)
                 goto done;
             break;
-        case 'U': /* Clixon 'pseudo' user */
+        case 'U': /* Masquerading user */
             if (clicon_username_set(h, optarg) < 0)
+                goto done;
+            break;
+        case 'g': /* Masquerading group */
+            if (clixon_groupname_set(h, optarg) < 0)
                 goto done;
             break;
         case 'o':{ /* Configuration option */
@@ -780,17 +788,18 @@ main(int    argc,
         goto done;
     if (clicon_nsctx_global_set(h, nsctx_global) < 0)
         goto done;
-    {
-        int enable;
-        /* Create autocli from YANG,
-           If not autocli enabled is true, you can start it later from a cli callback by calling autocli_start( h) */
-        if (autocli_enabled(h, &enable) < 0)
-            goto done;
-        if (!enable)
-            clixon_debug(CLIXON_DBG_CLI, "Autocli-enabled is false, skipping autocli generation");
-        else if (autocli_start(h) < 0)
-            goto done;
-    }
+    /* Create autocli from YANG,
+     * If not autocli enabled is true, you can start it later from a cli callback by calling autocli_start(h)
+     * If clispec-cache=read, autocli_start() may require backend connection, which makes the bootstrapping problematic.
+     * For example, if you want to dump the config or debug flags, you may not want to connect to the backend.
+     * We should maybe defer it until later
+     */
+    if (autocli_enabled(h, &enable) < 0)
+        goto done;
+    if (!enable)
+        clixon_debug(CLIXON_DBG_CLI, "Autocli-enabled is false, skipping autocli generation");
+    else if (autocli_start(h) < 0)
+        goto done;
     /* Initialize cli syntax.
      * Plugins have already been loaded by clixon_plugins_load above */
     if (clispec_load(h) < 0)
@@ -871,7 +880,7 @@ main(int    argc,
     /* Go into event-loop unless -1 command-line */
     if (once)
         retval = 0;
-    else
+    else 
         retval = cli_interactive(h);
   done:
     if (h){

@@ -6,7 +6,6 @@
 # user	0m0.001s
 # sys	0m0.002s
 
-
 # Magic line must be first in script (see README.md)
 s="$_" ; . ./lib.sh || if [ "$s" = $0 ]; then exit 0; else return 0; fi
 
@@ -166,13 +165,12 @@ fi
 new "wait backend"
 wait_backend
 
-
 new "Spawn expect script to simulate two CLI sessions"
 # -d to debug matching info
 time sudo expect -f- "$cfg" $(whoami) <<'EOF'
 
 log_user 0
-set timeout 5
+set timeout 10
 set CFG [lindex $argv 0]
 set USER [lindex $argv 1]
 

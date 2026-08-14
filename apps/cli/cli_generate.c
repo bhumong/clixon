@@ -102,6 +102,7 @@ You can see which CLISPEC it generates via clixon_cli -D 2:
 #include "clixon_cli_api.h"
 #include "cli_plugin.h"
 #include "cli_generate.h"
+#include "banned.h"
 
 /*! Add cv with name to cvec
  *
@@ -498,8 +499,11 @@ yang2cli_yanglib(clixon_handle h,
             continue;
         //        namespace = xml_find_body(xy, "namespace");
         cbuf_reset(cb);
-        if (clixon_rpc_clixon_cache(h, "read", "autocli", domain, spec, argument, revision, keyword, argument, cb) < 0)
+        if (clixon_rpc_clixon_cache(h, "read", "autocli", domain, spec, argument, revision, keyword, argument, cb) < 0){
+            if (clixon_err_category() == OE_PROTO)
+                clixon_err(OE_PROTO, 0, "Backend not reachable, clispec-cache=read requires a running backend");
             goto done;
+        }
         if (cbuf_len(cb) == 0)
             continue;
         if (yang2cli_client(h, cbuf_get(cb), argument, keyword, argument, &pt) < 0)
@@ -674,10 +678,9 @@ yang2cli_grouping_wrap(cligen_handle ch,
                 goto ok;
             break;
         case AUTOCLI_CACHE_READ: /* Query backend */
-                if (clixon_rpc_clixon_cache(h, "read", "autocli", domain, spec, module, revision, keyword, argument, cb) < 0)
-                    goto done;
-            if (cbuf_len(cb) == 0){
-                clixon_err(OE_UNIX, 0, "Tree empty %s 1", treename);
+            if (clixon_rpc_clixon_cache(h, "read", "autocli", domain, spec, module, revision, keyword, argument, cb) < 0){
+                if (clixon_err_category() == OE_PROTO)
+                    clixon_err(OE_PROTO, 0, "Backend not reachable, clispec-cache=read requires a running backend");
                 goto done;
             }
             break;

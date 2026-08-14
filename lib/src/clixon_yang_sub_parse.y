@@ -69,8 +69,17 @@
 
 %start top
 
-%lex-param     {void *_if} /* Add this argument to parse() and lex() function */
-%parse-param   {void *_if}
+%lex-param     {yyscan_t yyscanner}    /* passed to yylex() */
+%parse-param   {void *_if}             /* passed to yyparse() and yyerror() */
+%parse-param   {yyscan_t yyscanner}    /* passed to yyparse(), yylex(), and yyerror() */
+%define api.pure full                  /* make yylval a local, not a global */
+
+%code requires {
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+}
 
 %{
 
@@ -105,6 +114,7 @@
 #include "clixon_xml_vec.h"
 #include "clixon_data.h"
 #include "clixon_yang_sub_parse.h"
+#include "banned.h"
 
 /* Enable for debugging, steals some cycles otherwise */
 #if 0
@@ -115,7 +125,8 @@
 
 void
 clixon_yang_sub_parseerror(void *arg,
-                           char *s)
+                           yyscan_t yyscanner,
+                           char       *s)
 {
     clixon_yang_sub_parse_yacc *ife = (clixon_yang_sub_parse_yacc *)arg;
 
@@ -124,7 +135,7 @@ clixon_yang_sub_parseerror(void *arg,
                   ife->if_linenum,
                   ife->if_parse_string,
                   s,
-                  clixon_yang_sub_parsetext);
+                  clixon_yang_sub_parseget_text(yyscanner));
     return;
 }
 

@@ -73,6 +73,7 @@
 #include "backend_state.h"
 #include "backend_get.h"
 #include "backend_client.h"
+#include "banned.h"
 
 /*! Key values are checked for validity independent of user-defined callbacks
  *
@@ -154,9 +155,9 @@ find_target_equiv(cxobj *xsrc,
         path[depth++] = xp;
         xp = xml_parent(xp);
     }
-    if (depth == 0)
-        return NULL; /* xsrc is direct child of root */
-
+    if (depth == 0){
+        return xttop;  /* deleted node is a direct child of src root; flag target root */
+    }
     /* Walk the path top-down through the target tree */
     xt = xttop;
     for (j = depth - 1; j >= 0; j--){
@@ -167,8 +168,11 @@ find_target_equiv(cxobj *xsrc,
 
         if (ys != NULL &&
             yang_keyword_get(ys) == Y_LIST){
-            /* For list entries: match by first key value.
-             * yang_cvec_get(Y_LIST) stores key names as cv_string_get, not cv_name_get */
+            /* For list entries: find the child of xt whose element name matches
+             * xsnode's name and whose first key child has the same value.
+             * E.g. for exportingProcess[name=vpp] under ipfix-config, iterate
+             * children of xt named "exportingProcess" and pick the one containing
+             * <name>vpp</name>. */
             cvec   *keycvv = yang_cvec_get(ys);
             cg_var *kv     = keycvv ? cvec_i(keycvv, 0) : NULL;
 
@@ -177,8 +181,22 @@ find_target_equiv(cxobj *xsrc,
                 const char *keyval;
 
                 if (keyname != NULL &&
-                    (keyval = xml_find_body(xsnode, keyname)) != NULL)
-                    xmatch = xml_find_body_obj(xt, keyname, keyval);
+                    (keyval = xml_find_body(xsnode, keyname)) != NULL){
+                    cxobj      *xc;
+                    int         ix2 = 0;
+
+                    while ((xc = xml_child_iter(xt, &ix2, CX_ELMNT)) != NULL){
+                        const char *bstr;
+
+                        if (strcmp(xml_name(xc), name) != 0)
+                            continue;
+                        bstr = xml_find_body(xc, keyname);
+                        if (bstr != NULL && strcmp(bstr, keyval) == 0){
+                            xmatch = xc;
+                            break;
+                        }
+                    }
+                }
             }
         }
         /* Fall back to simple name match */
@@ -208,7 +226,7 @@ compute_diffs(clixon_handle       h,
 
     /* Clear flags xpath for get */
     xml_apply0(td->td_src, CX_ELMNT, (xml_applyfn_t*)xml_flag_reset,
-               (void*)(XML_FLAG_MARK|XML_FLAG_CHANGE));
+               (void*)(XML_FLAG_MARK|XML_FLAG_CHANGE|XML_FLAG_ADD_ANC));
     xml_apply0(td->td_target, CX_ELMNT, (xml_applyfn_t*)xml_flag_reset,
                (void*)(XML_FLAG_MARK|XML_FLAG_CHANGE|XML_FLAG_DEL_ANC));
     /* 3. Compute differences */
@@ -245,10 +263,19 @@ compute_diffs(clixon_handle       h,
         }
     }
     for (i=0; i<td->td_alen; i++){ /* Also down */
+        cxobj *xsrc_equiv;
+
         xn = td->td_avec[i];
         xml_flag_set(xn, XML_FLAG_ADD);
         xml_apply(xn, CX_ELMNT, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_ADD);
         xml_apply_ancestor(xn, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_CHANGE);
+        /* Symmetric to DEL_ANC: propagate XML_FLAG_ADD_ANC into the source
+         * tree so callers can identify source ancestors of added nodes. */
+        xsrc_equiv = find_target_equiv(xn, td->td_target, td->td_src);
+        if (xsrc_equiv != NULL){
+            xml_flag_set(xsrc_equiv, XML_FLAG_ADD_ANC);
+            xml_apply_ancestor(xsrc_equiv, (xml_applyfn_t*)xml_flag_set, (void*)XML_FLAG_ADD_ANC);
+        }
     }
     for (i=0; i<td->td_clen; i++){ /* Also up */
         xn = td->td_scvec[i];
@@ -1310,7 +1337,7 @@ load_failsafe(clixon_handle h,
         goto done;
     }
     /* Copy original running to tmp as backup (restore if error) */
-    if (xmldb_copy(h, "running", "tmp") < 0)
+    if (xmldb_copy_file(h, "running", "tmp") < 0)
         goto done;
     if (xmldb_db_reset(h, "running") < 0)
         goto done;

@@ -54,8 +54,22 @@
 
 %type <string> attvalue
 
-%lex-param     {void *_xy} /* Add this argument to parse() and lex() function */
-%parse-param   {void *_xy}
+%destructor { free($$); } NAME STRING
+%destructor { free($$); } attvalue
+
+%lex-param     {yyscan_t yyscanner}    /* passed to yylex() */
+%parse-param   {void *_xy}             /* passed to yyparse() and yyerror() */
+%parse-param   {yyscan_t yyscanner}    /* passed to yyparse(), yylex(), and yyerror() */
+%define api.pure full                  /* make yylval a local, not a global */
+
+%code requires {
+/* Inject yyscan_t typedef into the generated tab.h so callers can use it
+ * without pulling in the full flex header */
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+}
 
 %{
 
@@ -85,6 +99,7 @@
 #include "clixon_handle.h"
 #include "clixon_xml_sort.h"
 #include "clixon_xml_parse.h"
+#include "banned.h"
 
 /* Enable for debugging, steals some cycles otherwise */
 #if 0
@@ -94,13 +109,14 @@
 #endif
 
 void
-clixon_xml_parseerror(void *_xy,
-                      char *s)
+clixon_xml_parseerror(void       *_xy,
+                      yyscan_t    yyscanner,
+                      char       *s)
 {
     clixon_err(OE_XML, XMLPARSE_ERRNO, "xml_parse: line %d: %s: at or before: %s",
                _XY->xy_linenum,
                s,
-               clixon_xml_parsetext);
+               clixon_xml_parseget_text(yyscanner));
     return;
 }
 
@@ -117,15 +133,12 @@ static int
 xml_parse_flush_content(clixon_xml_yacc *xy)
 {
     int    retval = -1;
-    cxobj *xn;
 
     if (cbuf_len(xy->xy_cbuf) == 0){
         retval = 0;
         goto done;
     }
-    if ((xn = xml_new("body", xy->xy_xparent, CX_BODY)) == NULL)
-        goto done;
-    if (xml_value_append(xn, cbuf_get(xy->xy_cbuf)) < 0)
+    if (xml_body_append(xy->xy_xparent, cbuf_get(xy->xy_cbuf)) < 0)
         goto done;
     cbuf_reset(xy->xy_cbuf);
     retval = 0;
@@ -343,7 +356,7 @@ xml_parse_bslash(clixon_xml_yacc *xy,
     while ((xc = xml_child_iter(x, &ix, CX_ELMNT)) != NULL)
         break;
     if (xc != NULL){ /* at least one element */
-        if (xml_rm_children(x, CX_BODY) < 0) /* remove all bodies */
+        if (xml_body_reset(x) < 0) /* remove all bodies */
             goto done;
     }
     retval = 0;

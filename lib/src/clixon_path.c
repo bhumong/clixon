@@ -107,6 +107,7 @@
 #include "clixon_path.h"
 #include "clixon_api_path_parse.h"
 #include "clixon_instance_id_parse.h"
+#include "banned.h"
 
 /*! Given api-path, parse it, and return a clixon-path struct
  *
@@ -126,7 +127,7 @@
  * @endcode
  * @see clixon_path_free
  */
-static int
+int
 api_path_parse(char         *api_path,
                clixon_path **cplist)
 {
@@ -142,12 +143,16 @@ api_path_parse(char         *api_path,
     ay.ay_linenum = 1;
     if (api_path_scan_init(&ay) < 0)
         goto done;
-    if (api_path_parse_init(&ay) < 0)
+    if (api_path_parse_init(&ay) < 0){
+        api_path_scan_exit(&ay);
         goto done;
-    if (clixon_api_path_parseparse(&ay) != 0) { /* yacc returns 1 on error */
+    }
+    if (clixon_api_path_parseparse(&ay, ay.ay_scanner) != 0) { /* yacc returns 1 on error */
         clixon_log(NULL, LOG_NOTICE, "API-PATH error: on line %d", ay.ay_linenum);
         if (clixon_err_category() == 0)
             clixon_err(OE_XML, 0, "API-PATH parser error with no error code (should not happen)");
+        api_path_parse_exit(&ay);
+        api_path_scan_exit(&ay);
         goto done;
     }
     api_path_parse_exit(&ay);
@@ -175,7 +180,7 @@ api_path_parse(char         *api_path,
  * @endcode
  * @see clixon_path_free
  */
-static int
+int
 instance_id_parse(char         *path,
                   clixon_path **cplist)
 {
@@ -191,12 +196,16 @@ instance_id_parse(char         *path,
     iy.iy_linenum = 1;
     if (instance_id_scan_init(&iy) < 0)
         goto done;
-    if (instance_id_parse_init(&iy) < 0)
+    if (instance_id_parse_init(&iy) < 0){
+        instance_id_scan_exit(&iy);
         goto done;
-    if (clixon_instance_id_parseparse(&iy) != 0) { /* yacc returns 1 on error */
+    }
+    if (clixon_instance_id_parseparse(&iy, iy.iy_scanner) != 0) { /* yacc returns 1 on error */
         clixon_log(NULL, LOG_NOTICE, "Instance-id error: on line %d", iy.iy_linenum);
         if (clixon_err_category() == 0)
             clixon_err(OE_XML, 0, "Instance-id parser error with no error code (should not happen)");
+        instance_id_parse_exit(&iy);
+        instance_id_scan_exit(&iy);
         goto done;
     }
     instance_id_parse_exit(&iy);
@@ -689,7 +698,12 @@ api_path_fmt2xpath(const char *api_path_fmt,
                     clixon_err(OE_UNIX, errno, "cv2str_dup");
                     goto done;
                 }
-                cprintf(cb, "[%s='%s']", cv_name_get(cv), str);
+                cprintf(cb, "[%s=", cv_name_get(cv));
+                if (xpath_literal_encode(cb, str, 1) < 0){
+                    free(str);
+                    goto done;
+                }
+                cprintf(cb, "]");
                 free(str);
             }
         }
@@ -901,7 +915,10 @@ api_path2xpath_cvv(cvec      *api_path,
                     /* valvec is uri encoded, needs decoding */
                     if (uri_percent_decode(val1, &decval) < 0)
                         goto done;
-                    cprintf(xpath, "%s='%s']", cv_string_get(cvi), decval);
+                    cprintf(xpath, "%s=", cv_string_get(cvi));
+                    if (xpath_literal_encode(xpath, decval, 1) < 0)
+                        goto done;
+                    cprintf(xpath, "]");
                     if (decval){
                         free(decval);
                         decval = NULL;
@@ -912,7 +929,10 @@ api_path2xpath_cvv(cvec      *api_path,
                 if (val){
                     if (uri_percent_decode(val, &decval) < 0)
                         goto done;
-                    cprintf(xpath, "[.='%s']", decval);
+                    cprintf(xpath, "[.=");
+                    if (xpath_literal_encode(xpath, decval, 1) < 0)
+                        goto done;
+                    cprintf(xpath, "]");
                     if (decval){
                         free(decval);
                         decval = NULL;
@@ -1074,7 +1094,6 @@ api_path2xml_vec(char            **vec,
     char      *prefix = NULL;
     char      *restval;
     cxobj     *xn = NULL; /* new */
-    cxobj     *xb;        /* body */
     cvec      *cvk = NULL; /* vector of index keys */
     cg_var    *cvi;
     char      *keyname;
@@ -1180,13 +1199,11 @@ api_path2xml_vec(char            **vec,
         if ((x = xml_new(yang_argument_get(y), x0, CX_ELMNT)) == NULL)
             goto done;
         xml_spec_set(x, y);
-        if ((xb = xml_new("body", x, CX_BODY)) == NULL)
-            goto done;
         if (restval){
             if (uri_percent_decode(restval, &val) < 0)
                 goto done;
         }
-        if (val && xml_value_set(xb, val) < 0)
+        if (xml_body_set(x, val) < 0)
             goto done;
         break;
     case Y_LIST:
@@ -1238,19 +1255,16 @@ api_path2xml_vec(char            **vec,
                 if ((xn = xml_new(keyname, x, CX_ELMNT)) == NULL)
                     goto done;
                 xml_spec_set(xn, ykey);
-                if ((xb = xml_new("body", xn, CX_BODY)) == NULL)
-                    goto done;
+                val = NULL;
                 if (vi < nvalvec){
-                    /* Here assign and decode key values */
-                    val = NULL;
                     if (uri_percent_decode(valvec[vi], &val) < 0)
                         goto done;
-                    if (xml_value_set(xb, val) < 0)
-                        goto done;
-                    if (val){
-                        free(val);
-                        val = NULL;
-                    }
+                }
+                if (xml_body_set(xn, val) < 0)
+                    goto done;
+                if (val){
+                    free(val);
+                    val = NULL;
                 }
                 vi++;
             }
@@ -1394,6 +1408,7 @@ api_path2xml(const char *api_path,
  * @retval     -1         Fatal error
  *
  * @note both retval -1 set clixon_err, retval 0 set xerr netconf xml
+ * @note xtop is not sorted on exit
  * @see api_path2xpath For api-path to xml xpath translation
  * @see api_path2xml
  */

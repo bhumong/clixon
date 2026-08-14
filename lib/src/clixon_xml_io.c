@@ -85,6 +85,7 @@
 #include "clixon_xpath.h"
 #include "clixon_datastore.h"
 #include "clixon_xml_io.h"
+#include "banned.h"
 
 /*
  * Constants
@@ -306,7 +307,9 @@ xml2file_recurse(FILE                *f,
         (*fn)(f, " ");
         if (namespace)
             (*fn)(f, "%s:", namespace);
-        (*fn)(f, "%s=\"%s\"", name, xml_value(x));
+        if (xml_chardata_encode(&encstr, 1, "%s", xml_value(x)) < 0)
+            goto done;
+        (*fn)(f, "%s=\"%s\"", name, encstr);
         break;
     case CX_ELMNT:
         if (pretty && prefix)
@@ -319,6 +322,10 @@ xml2file_recurse(FILE                *f,
             (*fn)(f, " wd:default=\"true\"");
         hasbody = 0;
         haselement = 0;
+#ifdef OPTMEM_XML_BODY
+        if (xml_flag(x, XML_FLAG_BODY))
+            hasbody = 1;
+#endif
         /* print attributes only */
         ix = 0;
         while ((xc = xml_child_iter(x, &ix, -1)) != NULL) {
@@ -363,6 +370,13 @@ xml2file_recurse(FILE                *f,
                 if (pretty && hasbody == 0){
                     (*fn)(f, "\n");
                 }
+#ifdef OPTMEM_XML_BODY
+                if ((val = xml_body(x)) != NULL){
+                    if (xml_chardata_encode(&encstr, 0, "%s", val) < 0)
+                        goto done;
+                    (*fn)(f, "%s", encstr);
+                }
+#endif
             }
             ix = 0;
             while ((xc = xml_child_iter(x, &ix, -1)) != NULL) {
@@ -700,6 +714,10 @@ xml2cbuf_recurse(cbuf             *cb,
             cbuf_append_str(cb, " wd:default=\"true\"");
         hasbody = 0;
         haselement = 0;
+#ifdef OPTMEM_XML_BODY
+        if (xml_flag(x, XML_FLAG_BODY))
+            hasbody = 1;
+#endif
         /* print attributes only */
         ix = 0;
         while ((xc = xml_child_iter(x, &ix, -1)) != NULL)
@@ -724,6 +742,12 @@ xml2cbuf_recurse(cbuf             *cb,
             cbuf_append_str(cb, ">");
             if (pretty && hasbody == 0)
                 cbuf_append_str(cb, "\n");
+#ifdef OPTMEM_XML_BODY
+            if ((val = xml_body(x)) != NULL){
+                if (xml_chardata_cbuf_append(cb, 0, val) < 0)
+                    goto done;
+            }
+#endif
             ix = 0;
             while ((xc = xml_child_iter(x, &ix, -1)) != NULL)
                 if (xml_type(xc) != CX_ATTR){
@@ -956,7 +980,7 @@ _xml_parse(clixon_handle h,
     xy.xy_xparent = xt;
     if (clixon_xml_parsel_init(&xy) < 0)
         goto done;
-    if (clixon_xml_parseparse(&xy) != 0)  /* yacc returns 1 on error */
+    if (clixon_xml_parseparse(&xy, xy.xy_scanner) != 0)  /* yacc returns 1 on error */
         goto done;
     /* Purge all top-level body objects */
     x = NULL;

@@ -101,6 +101,7 @@
 #include "clixon_yang_internal.h"
 #include "clixon_yang_sub_parse.h"
 #include "clixon_yang_parse_lib.h"
+#include "banned.h"
 
 /* Size of json read buffer when reading from file*/
 #define BUFLEN 1024
@@ -885,7 +886,7 @@ yang_parse_str(const char *str,
             goto done;
         if (yang_parse_init(&yy) < 0)
             goto done;
-        if (clixon_yang_parseparse(&yy) != 0) { /* yacc returns 1 on error */
+        if (clixon_yang_parseparse(&yy, yy.yy_scanner) != 0) { /* yacc returns 1 on error */
             clixon_log(NULL, LOG_NOTICE, "Yang error: %s on line %d", name, yy.yy_linenum);
             if (clixon_err_category() == 0)
                 clixon_err(OE_YANG, 0, "yang parser error with no error code (should not happen)");
@@ -911,8 +912,12 @@ yang_parse_str(const char *str,
  done:
     clixon_debug(CLIXON_DBG_PARSE|CLIXON_DBG_DETAIL, "retval:%p", ymod);
     ystack_pop(&yy);
-    if (yy.yy_stack)
-        free (yy.yy_stack);
+    /* Free any extra frames left on stack by a failed parse */
+    while (yy.yy_stack) {
+        struct ys_stack *ystack = yy.yy_stack;
+        yy.yy_stack = ystack->ys_next;
+        free(ystack);
+    }
     return ymod;  /* top-level (sub)module */
 }
 
@@ -1988,6 +1993,8 @@ ys_parse(yang_stmt   *ys,
   done:
     if (reason)
         free(reason);
+    if (yang_cv_get(ys) == NULL && cv)
+        cv_free(cv);
     return yang_cv_get(ys);
 }
 

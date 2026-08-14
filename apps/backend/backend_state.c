@@ -71,6 +71,7 @@
 #include "backend_client.h"
 #include "backend_handle.h"
 #include "backend_state.h"
+#include "banned.h"
 
 /*! Restconf get capabilities
  *
@@ -625,6 +626,8 @@ clixon_backend_stats(clixon_handle  h,
     cprintf(cbret, "</module-sets>");
     retval = 0;
  done:
+    if (keys)
+        free(keys);
     if (xt)
 	xml_free(xt);
     return retval;

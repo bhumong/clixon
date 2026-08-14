@@ -61,6 +61,7 @@
 
 #include "grpc_gnmi.h"
 #include "grpc_nghttp2.h"
+#include "banned.h"
 
 /*! Per-stream state — accumulated headers and body for one gRPC call */
 typedef struct grpc_stream {
@@ -257,6 +258,11 @@ on_data_chunk_cb(nghttp2_session *session,
     if ((gs = grpc_stream_get(gc, stream_id)) == NULL)
         return NGHTTP2_ERR_CALLBACK_FAILURE;
     newlen = gs->gs_bodylen + len;
+    if (newlen > GRPC_REQUEST_BODY_MAX){
+        clixon_log(gc->gc_h, LOG_WARNING, "gRPC request body exceeds %d bytes, resetting stream",
+                   GRPC_REQUEST_BODY_MAX);
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE; /* reset stream */
+    }
     if (newlen > gs->gs_bodyalloc){
         if ((nb = realloc(gs->gs_body, newlen + 256)) == NULL){
             clixon_err(OE_UNIX, errno, "realloc");
@@ -485,6 +491,38 @@ grpc_send_framed(void           *gc_opaque,
     return retval;
 }
 
+/*! Build a human-readable error message for the gRPC grpc-message trailer
+ *
+ * CR/LF and other control characters are replaced by space, since gRPC
+ * transports the message as an HTTP/2 trailer value which must not contain
+ * such characters.
+ *
+ * @retval  cb    New cbuf with error message, free with cbuf_free()
+ * @retval  NULL  Error
+ */
+static cbuf *
+grpc_errmsg(void)
+{
+    cbuf       *cb;
+    char       *reason;
+    const char *src;
+    size_t      i;
+
+    if ((cb = cbuf_new()) == NULL){
+        clixon_err(OE_UNIX, errno, "cbuf_new");
+        return NULL;
+    }
+    reason = clixon_err_reason();
+    src = (reason != NULL && strlen(reason) > 0) ? reason : clixon_err_str();
+    for (i = 0; src[i] != '\0'; i++){
+        if ((unsigned char)src[i] < 0x20 || src[i] == 0x7f)
+            cprintf(cb, " ");
+        else
+            cprintf(cb, "%c", src[i]);
+    }
+    return cb;
+}
+
 /*! nghttp2 frame recv callback — dispatch complete requests */
 static int
 on_frame_recv_cb(nghttp2_session     *session,
@@ -498,6 +536,7 @@ on_frame_recv_cb(nghttp2_session     *session,
     const uint8_t *req_proto = NULL;
     size_t         req_proto_len = 0;
     int            gst;
+    cbuf          *cberr;
 
     clixon_debug(CLIXON_DBG_DEFAULT, "frame type:%u flags:0x%02x stream:%d",
                  frame->hd.type, frame->hd.flags, frame->hd.stream_id);
@@ -526,8 +565,11 @@ on_frame_recv_cb(nghttp2_session     *session,
             gst = GRPC_INTERNAL;
             if (gnmi_capabilities(gc->gc_h, req_proto, req_proto_len,
                                   &resp_buf, &resp_len, &gst) < 0){
+                cberr = grpc_errmsg();
                 grpc_send_response(gc, frame->hd.stream_id, NULL, 0,
-                                   gst, clixon_err_str());
+                                   gst, cberr ? cbuf_get(cberr) : NULL);
+                if (cberr)
+                    cbuf_free(cberr);
             }
             else {
                 grpc_send_response(gc, frame->hd.stream_id, resp_buf, resp_len,
@@ -540,8 +582,11 @@ on_frame_recv_cb(nghttp2_session     *session,
             gst = GRPC_INTERNAL;
             if (gnmi_get(gc->gc_h, req_proto, req_proto_len,
                          &resp_buf, &resp_len, &gst) < 0){
+                cberr = grpc_errmsg();
                 grpc_send_response(gc, frame->hd.stream_id, NULL, 0,
-                                   gst, clixon_err_str());
+                                   gst, cberr ? cbuf_get(cberr) : NULL);
+                if (cberr)
+                    cbuf_free(cberr);
             }
             else {
                 grpc_send_response(gc, frame->hd.stream_id, resp_buf, resp_len,
@@ -554,8 +599,11 @@ on_frame_recv_cb(nghttp2_session     *session,
             gst = GRPC_INTERNAL;
             if (gnmi_set(gc->gc_h, req_proto, req_proto_len,
                          &resp_buf, &resp_len, &gst) < 0){
+                cberr = grpc_errmsg();
                 grpc_send_response(gc, frame->hd.stream_id, NULL, 0,
-                                   gst, clixon_err_str());
+                                   gst, cberr ? cbuf_get(cberr) : NULL);
+                if (cberr)
+                    cbuf_free(cberr);
             }
             else {
                 grpc_send_response(gc, frame->hd.stream_id, resp_buf, resp_len,
@@ -568,8 +616,11 @@ on_frame_recv_cb(nghttp2_session     *session,
             gst = GRPC_INTERNAL;
             if (gnmi_subscribe(gc->gc_h, req_proto, req_proto_len,
                                &resp_buf, &resp_len, &gst) < 0){
+                cberr = grpc_errmsg();
                 grpc_send_response(gc, frame->hd.stream_id, NULL, 0,
-                                   gst, clixon_err_str());
+                                   gst, cberr ? cbuf_get(cberr) : NULL);
+                if (cberr)
+                    cbuf_free(cberr);
             }
             else {
                 grpc_send_framed(gc, frame->hd.stream_id, resp_buf, resp_len,
@@ -744,7 +795,11 @@ grpc_listen_init(clixon_handle h,
     setsockopt(ss, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
     memset(&sin, 0, sizeof sin);
     sin.sin_family      = AF_INET;
-    sin.sin_addr.s_addr = INADDR_ANY;
+    /* Bind to loopback only: the gNMI listener currently has NO TLS and NO
+     * authentication (see README "Remaining: TLS"). Exposing it on all
+     * interfaces would allow unauthenticated remote configuration read/write.
+     * Restrict to localhost until transport security is implemented. */
+    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sin.sin_port        = htons(port);
     if (bind(ss, (struct sockaddr *)&sin, sizeof sin) < 0){
         clixon_err(OE_UNIX, errno, "bind port %u", port);
@@ -756,7 +811,8 @@ grpc_listen_init(clixon_handle h,
     }
     if (clixon_event_reg_fd(ss, grpc_accept_cb, h, "grpc server") < 0)
         goto done;
-    clixon_log(h, LOG_NOTICE, "gRPC listening on port %u", port);
+    clixon_log(h, LOG_WARNING, "gRPC/gNMI listening on 127.0.0.1:%u WITHOUT TLS or "
+               "authentication; bound to loopback only", port);
     retval = 0;
  done:
     if (retval < 0 && ss >= 0)

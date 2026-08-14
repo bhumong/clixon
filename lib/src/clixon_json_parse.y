@@ -91,12 +91,23 @@ object.
 %token <string> J_STRING
 %token <string> J_NUMBER
 
+%destructor { free($$); } J_NUMBER number
+
 %type <cbuf>      string
 %type <cbuf>      ustring
 %type <string>    number
 
-%lex-param     {void *_jy} /* Add this argument to parse() and lex() function */
-%parse-param   {void *_jy}
+%lex-param     {yyscan_t yyscanner}    /* passed to yylex() */
+%parse-param   {void *_jy}             /* passed to yyparse() and yyerror() */
+%parse-param   {yyscan_t yyscanner}    /* passed to yyparse(), yylex(), and yyerror() */
+%define api.pure full                  /* make yylval a local, not a global */
+
+%code requires {
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+}
 
 %{
 /* Here starts user C-code */
@@ -104,7 +115,7 @@ object.
 /* typecast macro */
 #define _JY ((clixon_json_yacc *)_jy)
 
-#define _YYERROR(msg) {clixon_err(OE_JSON, 0, "YYERROR %s '%s' %d", (msg), clixon_json_parsetext, _JY->jy_linenum); YYERROR;}
+#define _YYERROR(msg) {clixon_err(OE_JSON, 0, "YYERROR %s '%s' %d", (msg), clixon_json_parseget_text(yyscanner), _JY->jy_linenum); YYERROR;}
 
 /* add _yy to error parameters */
 #define YY_(msgid) msgid
@@ -136,6 +147,7 @@ object.
 #include "clixon_string.h"
 
 #include "clixon_json_parse.h"
+#include "banned.h"
 
 /* Enable for debugging, steals some cycles otherwise */
 #if 0
@@ -150,14 +162,16 @@ extern int clixon_json_parseget_lineno  (void);
 */
 void
 clixon_json_parseerror(void *_jy,
-                       char *s)
+                       yyscan_t yyscanner,
+                       char       *s)
 {
     clixon_err(OE_JSON, 0, "json_parse: line %d: %s at or before: '%s'",
                _JY->jy_linenum,
                s,
-               clixon_json_parsetext);
+               clixon_json_parseget_text(yyscanner));
     if (_JY->jy_cbuf_str)
         cbuf_free(_JY->jy_cbuf_str);
+    _JY->jy_cbuf_str = NULL;
   return;
 }
 
@@ -187,6 +201,10 @@ json_current_new(clixon_json_yacc *jy,
     char      *id = NULL;
 
     clixon_debug(CLIXON_DBG_DEFAULT | CLIXON_DBG_DETAIL, "%s", __func__);
+    if (jy->jy_current == NULL){
+        clixon_err(OE_JSON, 0, "JSON object stack underflow");
+        goto done;
+    }
     /* Find colon separator and if found split into prefix:name */
     if (nodeid_split(name, &prefix, &id) < 0)
         goto done;
@@ -251,19 +269,16 @@ json_current_clone(clixon_json_yacc *jy)
 
 static int
 json_current_body(clixon_json_yacc *jy,
-                  char             *value)
+                 char             *value)
 {
-    int retval = -1;
-    cxobj *xn;
-
-    clixon_debug(CLIXON_DBG_DEFAULT | CLIXON_DBG_DETAIL, "%s", __func__);
-    if ((xn = xml_new("body", jy->jy_current, CX_BODY)) == NULL)
-        goto done;
-    if (value && xml_value_append(xn, value) < 0)
-        goto done;
-    retval = 0;
- done:
-    return retval;
+   clixon_debug(CLIXON_DBG_DEFAULT | CLIXON_DBG_DETAIL, "%s", __func__);
+   if (jy->jy_current == NULL){
+       clixon_err(OE_JSON, 0, "JSON object stack underflow");
+       return -1;
+   }
+   if (xml_body_set(jy->jy_current, value) < 0)
+       return -1;
+   return 0;
  }
 
 %}

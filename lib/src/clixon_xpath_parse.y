@@ -54,15 +54,15 @@
 %token <intval> RELOP
 
 %token <string> NUMBER
-%token <string> X_EOF
-%token <string> QUOTE
-%token <string> APOST
+%token X_EOF
+%token QUOTE
+%token APOST
 %token <string> CHARS
 %token <string> NCNAME
 %token <string> NODETYPE
-%token <string> DOUBLEDOT
-%token <string> DOUBLECOLON
-%token <string> DOUBLESLASH
+%token DOUBLEDOT
+%token DOUBLECOLON
+%token DOUBLESLASH
 %token <string> FUNCTIONNAME
 
 %type <intval>    axisspec
@@ -89,8 +89,21 @@
 %type <stack>     literal
 %type <stack>     functioncall
 
-%lex-param     {void *_xpy} /* Add this argument to parse() and lex() function */
-%parse-param   {void *_xpy}
+/* Free allocated strings and xpath_tree nodes when bison discards them during error recovery */
+%destructor { free($$); } <string>
+%destructor { if ($$) xpath_tree_free((xpath_tree *)$$); } <stack>
+
+%lex-param     {yyscan_t yyscanner}    /* passed to yylex() */
+%parse-param   {void *_xpy}             /* passed to yyparse() and yyerror() */
+%parse-param   {yyscan_t yyscanner}    /* passed to yyparse(), yylex(), and yyerror() */
+%define api.pure full                  /* make yylval a local, not a global */
+
+%code requires {
+#ifndef YY_TYPEDEF_YY_SCANNER_T
+#define YY_TYPEDEF_YY_SCANNER_T
+typedef void *yyscan_t;
+#endif
+}
 
 %{
 /* Here starts user C-code */
@@ -98,7 +111,7 @@
 /* typecast macro */
 #define _XPY ((clixon_xpath_yacc *)_xpy)
 
-#define _YYERROR(msg) {clixon_err(OE_XML, 0, "YYERROR %s '%s' %d", (msg), clixon_xpath_parsetext, _XPY->xpy_linenum); YYERROR;}
+#define _YYERROR(msg) {clixon_err(OE_XML, 0, "YYERROR %s '%s' %d", (msg), clixon_xpath_parseget_text(yyscanner), _XPY->xpy_linenum); YYERROR;}
 
 /* add _yy to error parameters */
 #define YY_(msgid) msgid
@@ -132,6 +145,7 @@
 #include "clixon_xpath_function.h"
 #include "clixon_xpath_eval.h"
 #include "clixon_xpath_parse.h"
+#include "banned.h"
 
 /* Best debugging is to enable PARSE_DEBUG below and add -d to the LEX compile statement in the Makefile
  * And then run the testcase with -D 1
@@ -155,14 +169,15 @@ extern int clixon_xpath_parseget_lineno  (void); /*XXX obsolete ? */
 
 void
 clixon_xpath_parseerror(void *_xpy,
-                        char *s)
+                        yyscan_t yyscanner,
+                        char       *s)
 {
     errno = 0;
     clixon_err(OE_XML, 0, "%s on line %d: %s at or before: '%s'",  /* Note lineno here is xpath, not yang */
                _XPY->xpy_name,
                _XPY->xpy_linenum,
                s,
-               clixon_xpath_parsetext);
+               clixon_xpath_parseget_text(yyscanner));
     return;
 }
 
@@ -246,7 +261,7 @@ xp_primary_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "Unknown xpath function \"%s\"", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
     }
     fn = ret;
@@ -271,7 +286,7 @@ xp_primary_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "XPath function \"%s\" is not implemented", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
 #endif
         break;
@@ -305,7 +320,7 @@ xp_primary_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "Unknown xpath function \"%s\"", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
         break;
     }
@@ -343,7 +358,7 @@ xp_nodetest_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "Unknown xpath function \"%s\"", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
     }
     fn = (enum clixon_xpath_function)ret;
@@ -355,7 +370,7 @@ xp_nodetest_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "XPath function \"%s\" is not implemented", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
         break;
     case XPATHFN_TEXT:     /* Group of implemented node functions */
@@ -367,14 +382,17 @@ xp_nodetest_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "Unknown xpath nodetest function \"%s\"", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
         break;
     }
     if (cb)
         cbuf_free(cb);
     xtret = xp_new(XP_NODE_FN, fn, NULL, name, NULL, NULL, NULL);
+    name = NULL;
  done:
+    if (name)
+        free(name);
     if (cb)
         cbuf_free(cb);
     return xtret;
@@ -400,7 +418,7 @@ xp_axisname_function(clixon_xpath_yacc *xpy,
             goto done;
         }
         cprintf(cb, "Unknown xpath axisname \"%s\"", name);
-        clixon_xpath_parseerror(xpy, cbuf_get(cb));
+        clixon_xpath_parseerror(xpy, xpy->xpy_scanner, cbuf_get(cb));
         goto done;
     }
  done:
@@ -485,9 +503,10 @@ abbreviatedstep : '.' predicates     { $$=xp_new(XP_STEP,A_SELF, NULL,NULL, NULL
                        | AbbreviatedAxisSpecifier 
 */
 axisspec    : NCNAME DOUBLECOLON
-                 { if (($$=xp_axisname_function(_XPY, $1)) < 0) YYERROR;
-                   free($1);
-                   _PARSE_DEBUG2("axisspec-> AXISNAME(%s -> %d) ::", $1, $$);
+                 { char *_n = $1; $1 = NULL;
+                   if (($$=xp_axisname_function(_XPY, _n)) < 0) { free(_n); YYERROR; }
+                   free(_n);
+                   _PARSE_DEBUG("axisspec-> AXISNAME ::");
                  }
             | abbreviatedaxisspec
                  { $$ = $1; }
@@ -502,9 +521,10 @@ abbreviatedaxisspec :'@'      { $$=A_ATTRIBUTE; _PARSE_DEBUG("axisspec-> @"); }
 nodetest    : nametest { $$ = $1;
                    _PARSE_DEBUG("nodetest-> nametest");}
             | NODETYPE ')'
-               { if (($$ = xp_nodetest_function(_XPY, $1)) == NULL) YYERROR;
-                   _PARSE_DEBUG1("nodetest-> nodetype(%s)", $1);
-               }
+            { char *_n = $1; $1 = NULL;
+              if (($$ = xp_nodetest_function(_XPY, _n)) == NULL) YYERROR;
+              _PARSE_DEBUG("nodetest-> nodetype");
+            }
             ;
 
 nametest    : ADDOP
@@ -555,21 +575,27 @@ literal     : QUOTE string QUOTE
 
 functioncall : NCNAME '(' ')'
                  { /* XXX warning: rule useless in parser due to conflicts */
-                   if (($$ = xp_primary_function(_XPY, $1, NULL)) == NULL) YYERROR;
+                   char *_n = $1; $1 = NULL;
+                   if (($$ = xp_primary_function(_XPY, _n, NULL)) == NULL) YYERROR;
                    _PARSE_DEBUG("primaryexpr-> functionname ()"); }
              | NCNAME '(' args ')'
-                 { if (($$ = xp_primary_function(_XPY, $1, $3)) == NULL) YYERROR;
+                 { char *_n = $1; $1 = NULL;
+                   if (($$ = xp_primary_function(_XPY, _n, $3)) == NULL) {
+                       xpath_tree_free($3); $3 = NULL;
+                       YYERROR;
+                   }
                    _PARSE_DEBUG("primaryexpr-> functionname (arguments)"); }
             ;
 
 string      : string CHARS  {
                          int len = strlen($1);
-                         $$ = realloc($1, len+strlen($2) + 1);
-                         sprintf($$+len, "%s", $2);
+                         int len2 = strlen($2);
+                         $$ = realloc($1, len+len2 + 1);
+                         memcpy($$+len, $2, len2+1);
                          free($2);
                          _PARSE_DEBUG("string-> string CHAR");
                }
-            | CHARS         { _PARSE_DEBUG("string-> "); }
+            | CHARS         { $$ = $1; _PARSE_DEBUG("string-> "); }
             ;
 
 %%

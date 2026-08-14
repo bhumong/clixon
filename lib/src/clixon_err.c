@@ -72,6 +72,7 @@
 #include "clixon_xml_io.h"
 #include "clixon_yang_module.h"
 #include "clixon_plugin.h"
+#include "banned.h"
 
 /*
  * Types
@@ -290,7 +291,10 @@ clixon_err_args(clixon_handle h,
         goto done;
     }
     cbuf_reset(_err_reason);
-    cprintf(_err_reason, "%s", msg);
+    if (suberr && suberr != XMLPARSE_ERRNO)
+        cprintf(_err_reason, "%s: %s", msg, strerror(suberr));
+    else
+        cprintf(_err_reason, "%s", msg);
     _err_category = category;
     _err_subnr = suberr;
     /* Check category callbacks as defined in clixon_err_cat_reg */
@@ -385,10 +389,13 @@ netconf_err2cb(clixon_handle h,
         cprintf(cberr, "%s ", xml_body(x));
     if ((x = xml_find_type(xerr, NULL, "error-message", CX_ELMNT)) != NULL)
         cprintf(cberr, "%s ", xml_body(x));
-    if ((x = xml_find_type(xerr, NULL, "error-info", CX_ELMNT)) != NULL &&
-        xml_child_nr(x) > 0){
-        if (clixon_xml2cbuf(cberr, xml_child_i(x, 0), 0, 0, NULL, -1, 0) < 0)
-            goto done;
+    if ((x = xml_find_type(xerr, NULL, "error-info", CX_ELMNT)) != NULL){
+        if (xml_child_nr(x) > 0){
+            if (clixon_xml2cbuf(cberr, xml_child_i(x, 0), 0, 0, NULL, -1, 0) < 0)
+                goto done;
+        }
+        else if (xml_body(x) != NULL)
+            cprintf(cberr, "%s", xml_body(x));
     }
     if ((x = xml_find_type(xerr, NULL, "error-app-tag", CX_ELMNT)) != NULL)
         cprintf(cberr, ": %s ", xml_body(x));

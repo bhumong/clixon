@@ -80,6 +80,7 @@
 #include "clixon_yang_type.h"
 #include "clixon_xml_map.h"
 #include "clixon_xml_bind.h"
+#include "banned.h"
 
 /*
  * Local variables
@@ -113,7 +114,7 @@ xml_bind_netconf_message_id_optional(int val)
  *
  * May apply to other nodes?
  * Exception for bodies marked with XML_FLAG_BODYKEY, see text syntax parsing
- * @see text_mark_bodies
+ * @see text_populate_list
  */
 static int
 strip_body_objects(cxobj *xt)
@@ -125,6 +126,11 @@ strip_body_objects(cxobj *xt)
     if ((yt = xml_spec(xt)) != NULL){
         keyword = yang_keyword_get(yt);
         if (keyword == Y_LIST || keyword == Y_CONTAINER){
+#ifdef OPTMEM_XML_BODY
+            /* In OPTMEM_XML_BODY mode, body is stored inline in the element */
+            if (xml_flag(xt, XML_FLAG_BODY))
+                xml_body_reset(xt);
+#endif
             xb = NULL;
             /* Quits if marked object, assume all are same */
             while ((xb = xml_find_type(xt, NULL, "body", CX_BODY)) != NULL &&
@@ -565,6 +571,7 @@ xml_bind_yang0_opt(clixon_handle h,
     char      *name;
     yang_bind  ybc;
     char      *prefix;
+    char      *ns = NULL;    /* resolved namespace of xc */
     int        ix;
     int        ret;
 
@@ -607,19 +614,25 @@ xml_bind_yang0_opt(clixon_handle h,
     }
     ix = 0;
     while ((xc = xml_child_iter(xt, &ix, CX_ELMNT)) != NULL) {
-        /* It is xml2ns in populate_self_parent that needs improvement */
-        /* cache previous + prefix */
         name = xml_name(xc);
         prefix = xml_prefix(xc);
+        /* cache previous child by name+prefix for list-element optimization */
         if (yc0 != NULL &&
             clicon_strcmp(name0, name) == 0 &&
             clicon_strcmp(prefix0, prefix) == 0){
             if ((ret = xml_bind_yang0_opt(h, xc, ybc, yspec, xc0, jsonenc, skip_mnt, xerr)) < 0)
                 goto done;
         }
-        else if (xsibling &&
-                 (xs = xml_find_type(xsibling, prefix, name, CX_ELMNT)) != NULL){
-            if ((ret = xml_bind_yang0_opt(h, xc, ybc, yspec, xs, jsonenc, skip_mnt, xerr)) < 0)
+        else if (xsibling) {
+            /* Resolve namespace to find the right sibling child when multiple
+             * children share the same local name but differ in namespace */
+            if (xml2ns(xc, prefix, &ns) < 0)
+                goto done;
+            if ((xs = xml_find_type_ns(xsibling, name, ns)) != NULL){
+                if ((ret = xml_bind_yang0_opt(h, xc, ybc, yspec, xs, jsonenc, skip_mnt, xerr)) < 0)
+                    goto done;
+            }
+            else if ((ret = xml_bind_yang0_opt(h, xc, ybc, yspec, NULL, jsonenc, skip_mnt, xerr)) < 0)
                 goto done;
         }
         else if ((ret = xml_bind_yang0_opt(h, xc, ybc, yspec, NULL, jsonenc, skip_mnt, xerr)) < 0)

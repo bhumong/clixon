@@ -90,6 +90,7 @@
 #ifdef HAVE_LIBNGHTTP2          /* Ends at end-of-file */
 #include "restconf_nghttp2.h"   /* Restconf-openssl mode specific headers*/
 #include "clixon_http_data.h"
+#include "banned.h"
 
 #define ARRLEN(x) (sizeof(x) / sizeof(x[0]))
 
@@ -610,7 +611,7 @@ on_frame_recv_callback(nghttp2_session     *session,
                 return 0;
             /* Query vector, ie the ?a=x&b=y stuff */
             query = restconf_param_get(rc->rc_h, "REQUEST_URI");
-            if ((query = index(query, '?')) != NULL){
+            if (query != NULL && (query = index(query, '?')) != NULL){
                 query++;
                 if (strlen(query) &&
                     uri_str2cvec(query, '&', '=', 1, &sd->sd_qvec) < 0)
@@ -668,6 +669,8 @@ on_data_chunk_recv_callback(nghttp2_session *session,
 
     clixon_debug(CLIXON_DBG_RESTCONF, "%d", stream_id);
     if ((sd = restconf_stream_find(rc, stream_id)) != NULL){
+        if (cbuf_len(sd->sd_indata) + len > RESTCONF_REQUEST_BODY_MAX)
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE; /* reset stream */
         cbuf_append_buf(sd->sd_indata, (void*)data, len);
     }
     return 0;

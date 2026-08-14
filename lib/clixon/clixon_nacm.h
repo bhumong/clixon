@@ -57,7 +57,7 @@ enum nacm_access{
  * Prototypes
  */
 int nacm_proxyuser_add(clixon_handle h, const char *user);
-int nacm_rpc(const char *rpc, const char *module, const char *username, cxobj *xnacm, cbuf *cbret);
+int nacm_rpc(clixon_handle h, const char *rpc, const char *module, const char *username, cxobj *xnacm, cbuf *cbret);
 int nacm_datanode_read1(clixon_handle h, cxobj *xt, const char *username, cxobj *nacm_xtree);
 int nacm_datanode_read_prune(clixon_handle h, cxobj *xt);
 int nacm_datanode_write(clixon_handle h, cxobj *xr, cxobj *xt,
@@ -77,7 +77,7 @@ typedef struct nacm_autocli_filter {
                               * if deny_default=1: explicitly permitted paths */
 } nacm_autocli_filter_t;
 
-int  nacm_autocli_filter_build(const char *username, cxobj *xnacm, nacm_autocli_filter_t **nafp);
+int  nacm_autocli_filter_build(clixon_handle h, const char *username, cxobj *xnacm, nacm_autocli_filter_t **nafp);
 int  nacm_autocli_filter_active(nacm_autocli_filter_t *naf);
 int  nacm_autocli_yang_skip(const char *node_path, nacm_autocli_filter_t *naf, int *skip);
 void nacm_autocli_filter_free(nacm_autocli_filter_t *naf);
